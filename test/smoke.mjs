@@ -264,6 +264,50 @@ assert.ok(leftHit && rightHit, `assembly places both instances (left ${leftHit},
   assert.ok(sheetC && Buffer.compare(Buffer.from(sheet.pixels), Buffer.from(sheetC.pixels)) !== 0, 'custom view list changes the sheet')
 }
 
+// 5a5. Highlight + markers
+{
+  const orangeShare = px => {
+    let orange = 0, body = 0
+    for (let i = 0; i < px.length; i += 4) {
+      const [r, g, b] = [px[i], px[i+1], px[i+2]]
+      if (r === 255 && g === 255 && b === 255) continue
+      body++
+      if (r > 150 && g > 60 && g < 160 && b < 80) orange++
+    }
+    return { orange, body }
+  }
+  const [plain] = await renderSessionData({ tree, graphic }, { width: 200, height: 150 })
+  // Highlight by face (mesh id 1), by container (100), by owner solid (30) — all must fire.
+  for (const id of [1, 100, 30]) {
+    const [hl] = await renderSessionData({ tree, graphic }, { width: 200, height: 150, highlight: [id] })
+    const s = orangeShare(hl.pixels)
+    assert.ok(s.orange > s.body * 0.8, `highlight by id ${id} turns the body orange (${s.orange}/${s.body})`)
+  }
+  // Unknown id → byte-identical to no-highlight
+  const [hlNone] = await renderSessionData({ tree, graphic }, { width: 200, height: 150, highlight: [99999] })
+  assert.ok(Buffer.compare(Buffer.from(plain.pixels), Buffer.from(hlNone.pixels)) === 0, 'unmatched highlight is a no-op')
+  // Highlighted EDGE renders red pixels
+  const [hlEdge] = await renderSessionData({ tree, graphic }, { width: 200, height: 150, highlight: [2] })
+  let redEdge = 0
+  for (let i = 0; i < hlEdge.pixels.length; i += 4) {
+    if (hlEdge.pixels[i] === 230 && hlEdge.pixels[i+1] === 40) redEdge++
+  }
+  assert.ok(redEdge > 20, `highlighted edge draws in signal red (${redEdge} px)`)
+  // Marker: crosshair + label near the projected cube corner [0,0,10]
+  const [mk] = await renderSessionData({ tree, graphic }, {
+    width: 200, height: 150, markers: [{ position: [0, 0, 10], label: 'P1' }],
+  })
+  let redMk = 0
+  for (let i = 0; i < mk.pixels.length; i += 4) {
+    if (mk.pixels[i] === 220 && mk.pixels[i+1] === 30 && mk.pixels[i+2] === 30) redMk++
+  }
+  assert.ok(redMk > 25, `marker + label drawn (${redMk} red px)`)
+  const [mk2] = await renderSessionData({ tree, graphic }, {
+    width: 200, height: 150, markers: [{ position: [0, 0, 10], label: 'P1' }],
+  })
+  assert.ok(Buffer.compare(Buffer.from(mk.pixels), Buffer.from(mk2.pixels)) === 0, 'markers deterministic')
+}
+
 // 5b. Generalized camera: named-view equivalences + arbitrary views
 {
   const px = async view => (await renderSessionData({ tree, graphic }, { width: 200, height: 150, view }))[0].pixels

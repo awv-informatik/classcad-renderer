@@ -489,13 +489,23 @@ function clipPolyToSection(pts, s) {
  * of the same part share a color.
  *
  * The last parameter is either a color-mode string ('native' | 'distinct') or
- * an options object: { colors, section } — see normalizeSection above.
- * Returns { pixels: Buffer (RGBA), width, height } or null if no geometry.
+ * an options object:
+ *   colors    — 'native' | 'distinct' (see COLOR_MODES)
+ *   section   — { origin, normal } clipping plane (see normalizeSection)
+ *   highlight — array of ids to render in SIGNAL ORANGE. Ids match graphic
+ *               containers (container.id), their owning solids (container.owner),
+ *               individual faces (mesh.id) and edges (edge.id). Use it to make
+ *               "which face/edge/body is id N?" visible.
+ *   markers   — [{ position: [x,y,z], label?, color? }] probe markers drawn ON
+ *               TOP of everything (no depth test): crosshair + optional label.
+ * Returns { pixels, width, height, frame } or null if no geometry.
  */
 export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, instances = null, optsOrColorMode = 'native') {
   const opts = typeof optsOrColorMode === 'string' ? { colors: optsOrColorMode } : (optsOrColorMode ?? {})
   const colorMode = opts.colors ?? 'native'
   const section = normalizeSection(opts.section)
+  const highlightIds = Array.isArray(opts.highlight) && opts.highlight.length ? new Set(opts.highlight.map(Number)) : null
+  const HIGHLIGHT_RGB = [1.0, 0.45, 0.05] // signal orange
 
   const allPts2d = []
   const tris = []  // { v0, v1, v2 (screen+depth), r, g, b }
@@ -506,10 +516,14 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
     const { container, transform, paletteIdx } = draw
     const fallback = BODY_PALETTES[paletteIdx % BODY_PALETTES.length]
     for (const mesh of (container.meshes || [])) {
+      const meshHighlighted = highlightIds &&
+        (highlightIds.has(Number(mesh.id)) || highlightIds.has(Number(container.id)) || highlightIds.has(Number(container.owner)))
       // native: model's own colors (mesh material > container material > palette)
-      const palette = colorMode === 'distinct'
-        ? fallback
-        : materialRgb(mesh.material) ?? materialRgb(container.properties?.material) ?? fallback
+      const palette = meshHighlighted
+        ? HIGHLIGHT_RGB
+        : colorMode === 'distinct'
+          ? fallback
+          : materialRgb(mesh.material) ?? materialRgb(container.properties?.material) ?? fallback
       const verts = mesh.vertices, norms = mesh.normals, indices = mesh.indices
       for (let i = 0; i < indices.length; i += 3) {
         // World-space triangle (instance transform applied). ALL original
@@ -545,7 +559,8 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
           for (let k = 1; k + 1 < clipped.length; k++) polys.push([clipped[0], clipped[k], clipped[k + 1]])
         }
 
-        const brightness = Math.max(0.25, Math.min(1, 0.3 + 0.7 * Math.abs(lz))) * facing
+        let brightness = Math.max(0.25, Math.min(1, 0.3 + 0.7 * Math.abs(lz))) * facing
+        if (meshHighlighted) brightness = Math.max(0.62, brightness)
         const shade = 100 + 130 * brightness
         const r = Math.round(shade * palette[0])
         const g = Math.round(shade * palette[1])
@@ -596,12 +611,15 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
         }
         if (cur.length) pieces.push(cur)
       }
+      const edgeHighlighted = highlightIds && highlightIds.has(Number(edge.id))
       for (const piece of pieces) {
         if (piece.length < 2) continue
-        edgeLines.push(piece.map(([ex, ey, ez]) => {
+        const proj = piece.map(([ex, ey, ez]) => {
           const [px, py, pz] = project(ex, ey, ez)
           return { px, py, pz }
-        }))
+        })
+        proj.highlighted = edgeHighlighted
+        edgeLines.push(proj)
       }
     }
   }
@@ -619,12 +637,43 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
     _rasterTri(pixels, zBuf, width, height, sv[0], sv[1], sv[2], tri.r, tri.g, tri.b)
   }
 
-  // Draw edges on top (2px, dark color, with depth test)
+  // Draw edges on top (2px, dark color, with depth test). Highlighted edges:
+  // signal red, generous z-bias so they stay visible on their surface.
   const edgeColor = { r: 26, g: 26, b: 58 }
+  const hlColor = { r: 230, g: 40, b: 30 }
   for (const epts of edgeLines) {
     const sv = epts.map(v => { const [sx, sy] = xf(v.px, v.py); return { sx, sy, sz: v.pz } })
     for (let i = 0; i < sv.length - 1; i++) {
-      _rasterLine(pixels, zBuf, width, height, sv[i], sv[i+1], edgeColor, 0.5)
+      if (epts.highlighted) {
+        _rasterLine(pixels, zBuf, width, height, sv[i], sv[i+1], hlColor, 2)
+        _rasterLine(pixels, zBuf, width, height, { ...sv[i], sy: sv[i].sy + 1 }, { ...sv[i+1], sy: sv[i+1].sy + 1 }, hlColor, 2)
+      } else {
+        _rasterLine(pixels, zBuf, width, height, sv[i], sv[i+1], edgeColor, 0.5)
+      }
+    }
+  }
+
+  // Probe markers — always on top (no depth test): crosshair + label.
+  if (Array.isArray(opts.markers)) {
+    for (const m of opts.markers) {
+      if (!Array.isArray(m?.position) || m.position.length !== 3) continue
+      const [px, py] = project(m.position[0], m.position[1], m.position[2])
+      const [sx, sy] = xf(px, py)
+      const cx = Math.round(sx), cy = Math.round(sy)
+      const col = Array.isArray(m.color) && m.color.length === 3 ? m.color : [220, 30, 30]
+      const put = (x, y) => {
+        if (x < 0 || x >= width || y < 0 || y >= height) return
+        const i = (y * width + x) * 4
+        pixels[i] = col[0]; pixels[i+1] = col[1]; pixels[i+2] = col[2]; pixels[i+3] = 255
+      }
+      const R = 7
+      for (let d = -R; d <= R; d++) { put(cx + d, cy); put(cx, cy + d) } // cross
+      for (let a = 0; a < 32; a++) { // circle
+        const x = Math.round(cx + (R - 2) * Math.cos((a * Math.PI) / 16))
+        const y = Math.round(cy + (R - 2) * Math.sin((a * Math.PI) / 16))
+        put(x, y)
+      }
+      if (m.label) drawText(pixels, width, height, cx + R + 3, cy - 3, m.label, col, 1)
     }
   }
 
@@ -1894,7 +1943,7 @@ export function renderSolidSheet(graphic, width = IMG_W, height = IMG_H, instanc
   const views = Array.isArray(opts.views) && opts.views.length === 4 ? opts.views : ['top', 'iso', 'front', 'right']
   const qw = Math.floor(width / 2)
   const qh = Math.floor(height / 2)
-  const solidOpts = { colors: opts.colors, section: opts.section }
+  const solidOpts = { colors: opts.colors, section: opts.section, highlight: opts.highlight, markers: opts.markers }
 
   // Pass 1: auto-fit render per view to learn each frame.
   const firstPass = views.map(view => {
@@ -2034,6 +2083,12 @@ export function diffImages(a, b, opts = {}) {
  * @param {string} [options.view='iso'] — one of VIEW_NAMES
  * @param {number} [options.zoom=1]
  * @param {[number,number,number]} [options.lookAt]
+ * @param {number[]} [options.highlight] — ids rendered in SIGNAL ORANGE/RED:
+ *   graphic container ids, owning solid ids (container.owner), face mesh ids,
+ *   edge ids. Makes "which face/edge/body is id N?" visible.
+ * @param {Array<{position:number[],label?:string,color?:number[]}>} [options.markers]
+ *   — probe markers (crosshair + label) drawn on top of the solid render, e.g.
+ *   the probe points of a numeric verification.
  * @param {boolean|string[]} [options.sheet] — render the solids as a FOUR-VIEW
  *   SHEET (one image, quadrants TL/TR/BL/BR; default top/iso/front/right; the
  *   ortho views share one scale like a technical drawing). Pass an array of 4
@@ -2073,10 +2128,12 @@ export async function renderSessionData(source, options = {}) {
         views: Array.isArray(options.sheet) ? options.sheet : undefined,
         colors: options.colors ?? 'native',
         section: options.section,
+        highlight: options.highlight,
+        markers: options.markers,
       })
       if (sheet) out.push({ type: 'sheet', kind: 'pixels', ...sheet })
     } else {
-      const zbuf = renderSolidZBuffer(solidOnly, width, height, instances, { colors: options.colors ?? 'native', section: options.section })
+      const zbuf = renderSolidZBuffer(solidOnly, width, height, instances, { colors: options.colors ?? 'native', section: options.section, highlight: options.highlight, markers: options.markers })
       if (zbuf) out.push({ type: 'solid', kind: 'pixels', ...zbuf })
     }
   }
