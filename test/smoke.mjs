@@ -332,6 +332,32 @@ assert.ok(leftHit && rightHit, `assembly places both instances (left ${leftHit},
   assert.ok(Buffer.compare(Buffer.from(ovSolid.pixels), Buffer.from(withOv2.find(e => e.type === 'solid').pixels)) === 0, 'overlay deterministic')
 }
 
+// 5a7. Annotation overlay: triad colors, extents text, scale bar
+{
+  const [ann] = await renderSessionData({ tree, graphic }, { width: 300, height: 220, annotate: true })
+  const count = rgb => {
+    let n = 0
+    for (let i = 0; i < ann.pixels.length; i += 4) {
+      if (ann.pixels[i] === rgb[0] && ann.pixels[i+1] === rgb[1] && ann.pixels[i+2] === rgb[2]) n++
+    }
+    return n
+  }
+  assert.ok(count([200, 40, 40]) > 10, 'X axis (red) drawn')
+  assert.ok(count([40, 150, 40]) > 10, 'Y axis (green) drawn')
+  assert.ok(count([40, 70, 200]) > 10, 'Z axis (blue) drawn')
+  const inkPx = count([60, 60, 60])
+  assert.ok(inkPx > 80, `extents text + scale bar drawn (${inkPx} ink px)`)
+  const [ann2] = await renderSessionData({ tree, graphic }, { width: 300, height: 220, annotate: true })
+  assert.ok(Buffer.compare(Buffer.from(ann.pixels), Buffer.from(ann2.pixels)) === 0, 'annotate deterministic')
+  // In the FRONT view the Y axis points into the screen — only X and Z visible.
+  const [annF] = await renderSessionData({ tree, graphic }, { width: 300, height: 220, annotate: true, view: 'front' })
+  let green = 0
+  for (let i = 0; i < annF.pixels.length; i += 4) {
+    if (annF.pixels[i] === 40 && annF.pixels[i+1] === 150 && annF.pixels[i+2] === 40) green++
+  }
+  assert.ok(green === 0, `front view hides the into-screen Y axis (${green} green px)`)
+}
+
 // 5b. Generalized camera: named-view equivalences + arbitrary views
 {
   const px = async view => (await renderSessionData({ tree, graphic }, { width: 200, height: 150, view }))[0].pixels

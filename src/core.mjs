@@ -498,6 +498,10 @@ function clipPolyToSection(pts, s) {
  *               "which face/edge/body is id N?" visible.
  *   markers   — [{ position: [x,y,z], label?, color? }] probe markers drawn ON
  *               TOP of everything (no depth test): crosshair + optional label.
+ *   annotate  — true: draw a measurement overlay — world-space bounding-box
+ *               extents (X x Y x Z, model units, bottom right), an RGB axes
+ *               triad oriented like the current view (bottom left), and a
+ *               scale bar with a round model-unit length (bottom center).
  *   overlays  — [{ pts: [[x,y,z],…], color?, dashed? }] world-space polylines
  *               drawn on top (no depth test), e.g. sketch curves in 3D. Overlay
  *               points participate in auto-fit, and they alone are enough to
@@ -511,6 +515,13 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
   const highlightIds = Array.isArray(opts.highlight) && opts.highlight.length ? new Set(opts.highlight.map(Number)) : null
   const HIGHLIGHT_RGB = [1.0, 0.45, 0.05] // signal orange
   const overlays = Array.isArray(opts.overlays) ? opts.overlays.filter(o => Array.isArray(o?.pts) && o.pts.length >= 2) : []
+  const annotate = !!opts.annotate
+  const wmin = [Infinity, Infinity, Infinity], wmax = [-Infinity, -Infinity, -Infinity]
+  const growBBox = (x, y, z) => {
+    if (x < wmin[0]) wmin[0] = x; if (x > wmax[0]) wmax[0] = x
+    if (y < wmin[1]) wmin[1] = y; if (y > wmax[1]) wmax[1] = y
+    if (z < wmin[2]) wmin[2] = z; if (z > wmax[2]) wmax[2] = z
+  }
 
   const allPts2d = []
   const tris = []  // { v0, v1, v2 (screen+depth), r, g, b }
@@ -540,6 +551,7 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
           let vx = verts[idx*3], vy = verts[idx*3+1], vz = verts[idx*3+2]
           if (transform) [vx, vy, vz] = applyMatPoint(transform, vx, vy, vz)
           wv.push([vx, vy, vz])
+          if (annotate) growBBox(vx, vy, vz)
           const [px, py] = project(vx, vy, vz)
           allPts2d.push([px, py])
         }
@@ -719,6 +731,53 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
         put(x, y)
       }
       if (m.label) drawText(pixels, width, height, cx + R + 3, cy - 3, m.label, col, 1)
+    }
+  }
+
+  // Measurement overlay: extents, axes triad, scale bar.
+  if (annotate && Number.isFinite(wmin[0])) {
+    const ink = [60, 60, 60]
+    const fmt = v => (Math.abs(v - Math.round(v)) < 0.05 ? String(Math.round(v)) : v.toFixed(1))
+    // Extents (bottom right)
+    const ext = `${fmt(wmax[0] - wmin[0])} X ${fmt(wmax[1] - wmin[1])} X ${fmt(wmax[2] - wmin[2])}`
+    drawText(pixels, width, height, width - measureText(ext, 2) - 10, height - 24, ext, ink, 2)
+    // Axes triad (bottom left) — directions follow the current view projection.
+    const anchor = [34, height - 34]
+    const axes = [
+      { d: [1, 0, 0], color: [200, 40, 40], label: 'X' },
+      { d: [0, 1, 0], color: [40, 150, 40], label: 'Y' },
+      { d: [0, 0, 1], color: [40, 70, 200], label: 'Z' },
+    ]
+    for (const ax of axes) {
+      const [dx, dy] = project(ax.d[0], ax.d[1], ax.d[2])
+      const len = Math.hypot(dx, dy)
+      if (len < 1e-6) continue // axis points into the screen in this view
+      const ux = dx / len, uy = -dy / len // screen y grows downward
+      const L = 26
+      const tip = { sx: anchor[0] + ux * L, sy: anchor[1] + uy * L, sz: 1e12 }
+      _rasterLine(pixels, zBuf, width, height, { sx: anchor[0], sy: anchor[1], sz: 1e12 }, tip, { r: ax.color[0], g: ax.color[1], b: ax.color[2] }, 1e12)
+      drawText(pixels, width, height, tip.sx + ux * 4 - 2, tip.sy + uy * 4 - 3, ax.label, ax.color, 1)
+    }
+    // Scale bar (bottom center): round model-unit length mapping to 60–140 px.
+    const scale = _lastFrame?.scale
+    if (scale > 0) {
+      let L = Math.pow(10, Math.floor(Math.log10(100 / scale)))
+      for (const m of [1, 2, 5, 10]) { if (L * m * scale >= 60) { L = L * m; break } }
+      const px = L * scale
+      const y0 = height - 16
+      const x0 = Math.round(width / 2 - px / 2)
+      for (let x = 0; x <= px; x++) {
+        const i = (y0 * width + Math.min(width - 1, x0 + x)) * 4
+        pixels[i] = ink[0]; pixels[i+1] = ink[1]; pixels[i+2] = ink[2]; pixels[i+3] = 255
+      }
+      for (const xx of [x0, Math.round(x0 + px)]) {
+        for (let dy = -4; dy <= 0; dy++) {
+          const i = ((y0 + dy) * width + Math.min(width - 1, xx)) * 4
+          pixels[i] = ink[0]; pixels[i+1] = ink[1]; pixels[i+2] = ink[2]; pixels[i+3] = 255
+        }
+      }
+      const lbl = fmt(L)
+      drawText(pixels, width, height, width / 2 - measureText(lbl, 1) / 2, y0 - 14, lbl, ink, 1)
     }
   }
 
@@ -2203,6 +2262,9 @@ export function diffImages(a, b, opts = {}) {
  * @param {string} [options.view='iso'] — one of VIEW_NAMES
  * @param {number} [options.zoom=1]
  * @param {[number,number,number]} [options.lookAt]
+ * @param {boolean} [options.annotate] — measurement overlay on the solid render:
+ *   bounding-box extents (model units), RGB axes triad for the current view,
+ *   and a scale bar. A snapshot that answers "how big is this?" by itself.
  * @param {boolean} [options.sketchOverlay] — draw every sketch's curves in 3D
  *   (world space, on the sketch plane) ON TOP of the solid render — verifies a
  *   sketch sits on the intended plane at the intended place. Construction
@@ -2272,7 +2334,7 @@ export async function renderSessionData(source, options = {}) {
       })
       if (sheet) out.push({ type: 'sheet', kind: 'pixels', ...sheet })
     } else {
-      const zbuf = renderSolidZBuffer(solidOnly, width, height, instances, { colors: options.colors ?? 'native', section: options.section, highlight: options.highlight, markers: options.markers, overlays: sketchOverlays ?? undefined })
+      const zbuf = renderSolidZBuffer(solidOnly, width, height, instances, { colors: options.colors ?? 'native', section: options.section, highlight: options.highlight, markers: options.markers, overlays: sketchOverlays ?? undefined, annotate: options.annotate })
       if (zbuf) out.push({ type: 'solid', kind: 'pixels', ...zbuf })
     }
   }
