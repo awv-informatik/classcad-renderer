@@ -51,6 +51,14 @@ await renderSession(client, 'detail', './out', { view: 'front', zoom: 3, lookAt:
 > **destroys entity-injection (direct-modeling) bodies** — pass `{ recalc: false }`
 > for sessions built with `solid.*`/EIF flows.
 
+> **Edges need database settings.** The engine only includes brep edge data in
+> graphic containers after `v1.common.setDatabaseSettings({ isGraphicEnabled: true,
+> isCCGraphicEnabled: true, isSketchGraphicEnabled: true, doCurveTessellation: true })`.
+> `renderSession` sets this automatically (`ensureGraphics: false` to skip). When
+> feeding `renderSessionData` yourself (browser/core), make sure the session had
+> these settings before the graphic was produced — otherwise solids render
+> without their edge overlay.
+
 Lower-level (no files): `renderSessionData` + `pixelsToPng`/`svgToPngBuffer`.
 
 ## Browser (buerli-ai, custom apps)

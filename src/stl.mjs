@@ -122,3 +122,30 @@ export function renderIsometric(triangles, width, height) {
   }
   return buf
 }
+
+/**
+ * Parse a BINARY STL buffer into { normal, vertices } triangles for
+ * renderIsometric. Pure — pass any Uint8Array/Buffer with binary STL bytes
+ * (e.g. from v1.common.save({ format: 'STL', encoding: 'base64', stl: { binary: true } })).
+ */
+export function parseSTL(buf) {
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+  const triCount = dv.getUint32(80, true)
+  const triangles = []
+  let offset = 84
+  for (let i = 0; i < triCount; i++) {
+    const nx = dv.getFloat32(offset, true); offset += 4
+    const ny = dv.getFloat32(offset, true); offset += 4
+    const nz = dv.getFloat32(offset, true); offset += 4
+    const v = []
+    for (let j = 0; j < 3; j++) {
+      const x = dv.getFloat32(offset, true); offset += 4
+      const y = dv.getFloat32(offset, true); offset += 4
+      const z = dv.getFloat32(offset, true); offset += 4
+      v.push([x, y, z])
+    }
+    offset += 2 // attribute byte count
+    triangles.push({ normal: [nx, ny, nz], vertices: v })
+  }
+  return triangles
+}

@@ -70,6 +70,20 @@ export async function fetchGraphic(client, { recalc = true } = {}) {
  * @returns {Promise<{ type: string, file: string }[]>}
  */
 export async function renderSession(client, prefix, outDir, options = {}) {
+  // Without these database settings the server omits brep EDGE data from the
+  // graphic containers — solids then render without their edge overlay. The
+  // classcad-agent harness sets this before every snapshot; do the same here
+  // so package consumers get the full render by default. (ensureGraphics:
+  // false skips it, e.g. when the app manages settings itself.)
+  if (options.ensureGraphics !== false) {
+    try {
+      await client.execute({
+        'v1.common.setDatabaseSettings': [
+          { isGraphicEnabled: true, isCCGraphicEnabled: true, isSketchGraphicEnabled: true, doCurveTessellation: true },
+        ],
+      })
+    } catch (e) { /* older servers may not support it — render without edges */ }
+  }
   const treeResult = await client.request('GetTree')
   const tree = treeResult.structure?.tree || {}
   const graphic = await fetchGraphic(client, { recalc: options.recalc !== false })
