@@ -358,6 +358,30 @@ assert.ok(leftHit && rightHit, `assembly places both instances (left ${leftHit},
   assert.ok(green === 0, `front view hides the into-screen Y axis (${green} green px)`)
 }
 
+// 5a8. X-ray: a hidden body shines through the one in front
+{
+  // Red cube in front (y 0..10), blue cube behind (y 20..30), same x/z → in the
+  // FRONT view their silhouettes coincide and the red one fully occludes.
+  const twoG = cubeGraphic()
+  twoG.containers[0].properties.material.color = [220, 40, 40]
+  const back = cubeGraphic()
+  for (let i = 1; i < back.containers[0].meshes[0].vertices.length; i += 3) back.containers[0].meshes[0].vertices[i] += 20
+  back.containers[0].id = 101
+  back.containers[0].properties = { material: { color: [40, 40, 220], opacity: 1 }, layer: '0' }
+  back.containers[0].edges = []
+  twoG.containers.push(back.containers[0])
+
+  const centerPx = px => { const i = ((75) * 200 + 100) * 4; return [px[i], px[i+1], px[i+2]] }
+  const [opaque] = await renderSessionData({ tree, graphic: twoG }, { width: 200, height: 150, view: 'front' })
+  const [xr] = await renderSessionData({ tree, graphic: twoG }, { width: 200, height: 150, view: 'front', xray: true })
+  const oc = centerPx(opaque.pixels), xc = centerPx(xr.pixels)
+  assert.ok(oc[0] > oc[2] + 40, `opaque: front (red) body wins at center (${oc})`)
+  // X-ray: blue back cube must contribute — blue channel rises substantially vs opaque.
+  assert.ok(xc[2] > oc[2] + 25, `x-ray: hidden blue body shines through (${xc} vs ${oc})`)
+  const [xr2] = await renderSessionData({ tree, graphic: twoG }, { width: 200, height: 150, view: 'front', xray: true })
+  assert.ok(Buffer.compare(Buffer.from(xr.pixels), Buffer.from(xr2.pixels)) === 0, 'x-ray deterministic')
+}
+
 // 5b. Generalized camera: named-view equivalences + arbitrary views
 {
   const px = async view => (await renderSessionData({ tree, graphic }, { width: 200, height: 150, view }))[0].pixels

@@ -498,6 +498,10 @@ function clipPolyToSection(pts, s) {
  *               "which face/edge/body is id N?" visible.
  *   markers   — [{ position: [x,y,z], label?, color? }] probe markers drawn ON
  *               TOP of everything (no depth test): crosshair + optional label.
+ *   xray      — true: render bodies translucent (painter's blend, fixed alpha
+ *               ~0.42; xrayAlpha overrides). Hidden bodies and internal far
+ *               walls shine through; edges stay fully opaque on top. Back
+ *               faces remain culled, so images stay readable.
  *   annotate  — true: draw a measurement overlay — world-space bounding-box
  *               extents (X x Y x Z, model units, bottom right), an RGB axes
  *               triad oriented like the current view (bottom left), and a
@@ -516,6 +520,8 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
   const HIGHLIGHT_RGB = [1.0, 0.45, 0.05] // signal orange
   const overlays = Array.isArray(opts.overlays) ? opts.overlays.filter(o => Array.isArray(o?.pts) && o.pts.length >= 2) : []
   const annotate = !!opts.annotate
+  const xray = !!opts.xray
+  const xrayAlpha = typeof opts.xrayAlpha === 'number' && opts.xrayAlpha > 0 && opts.xrayAlpha < 1 ? opts.xrayAlpha : 0.42
   const wmin = [Infinity, Infinity, Infinity], wmax = [-Infinity, -Infinity, -Infinity]
   const growBBox = (x, y, z) => {
     if (x < wmin[0]) wmin[0] = x; if (x > wmax[0]) wmax[0] = x
@@ -659,10 +665,23 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
   const pixels = allocPixels(width * height * 4) // white RGBA
   const zBuf = new Float64Array(width * height).fill(-Infinity)
 
-  // Rasterize triangles
-  for (const tri of tris) {
-    const sv = tri.v.map(v => { const [sx, sy] = xf(v.px, v.py); return { sx, sy, sz: v.pz } })
-    _rasterTri(pixels, zBuf, width, height, sv[0], sv[1], sv[2], tri.r, tri.g, tri.b)
+  // Rasterize triangles. X-ray: painter's algorithm back-to-front with fixed
+  // alpha blending (no depth rejection) — hidden geometry shines through.
+  if (xray) {
+    const withDepth = tris.map(tri => ({
+      tri,
+      d: (tri.v[0].pz + tri.v[1].pz + tri.v[2].pz) / 3,
+    }))
+    withDepth.sort((a, b) => a.d - b.d) // far → near
+    for (const { tri } of withDepth) {
+      const sv = tri.v.map(v => { const [sx, sy] = xf(v.px, v.py); return { sx, sy, sz: v.pz } })
+      _rasterTriBlend(pixels, width, height, sv[0], sv[1], sv[2], tri.r, tri.g, tri.b, xrayAlpha)
+    }
+  } else {
+    for (const tri of tris) {
+      const sv = tri.v.map(v => { const [sx, sy] = xf(v.px, v.py); return { sx, sy, sz: v.pz } })
+      _rasterTri(pixels, zBuf, width, height, sv[0], sv[1], sv[2], tri.r, tri.g, tri.b)
+    }
   }
 
   // Draw edges on top (2px, dark color, with depth test). Highlighted edges:
@@ -673,10 +692,10 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
     const sv = epts.map(v => { const [sx, sy] = xf(v.px, v.py); return { sx, sy, sz: v.pz } })
     for (let i = 0; i < sv.length - 1; i++) {
       if (epts.highlighted) {
-        _rasterLine(pixels, zBuf, width, height, sv[i], sv[i+1], hlColor, 2)
-        _rasterLine(pixels, zBuf, width, height, { ...sv[i], sy: sv[i].sy + 1 }, { ...sv[i+1], sy: sv[i+1].sy + 1 }, hlColor, 2)
+        _rasterLine(pixels, zBuf, width, height, sv[i], sv[i+1], hlColor, xray ? 1e9 : 2)
+        _rasterLine(pixels, zBuf, width, height, { ...sv[i], sy: sv[i].sy + 1 }, { ...sv[i+1], sy: sv[i+1].sy + 1 }, hlColor, xray ? 1e9 : 2)
       } else {
-        _rasterLine(pixels, zBuf, width, height, sv[i], sv[i+1], edgeColor, 0.5)
+        _rasterLine(pixels, zBuf, width, height, sv[i], sv[i+1], edgeColor, xray ? 1e9 : 0.5)
       }
     }
   }
@@ -810,6 +829,29 @@ function _rasterTri(pixels, zBuf, w, h, v0, v1, v2, r, g, b) {
         const pi = idx * 4
         pixels[pi] = r; pixels[pi+1] = g; pixels[pi+2] = b; pixels[pi+3] = 255
       }
+    }
+  }
+}
+
+/** Rasterize a triangle with ALPHA BLENDING and no depth test (x-ray mode). */
+function _rasterTriBlend(pixels, w, h, v0, v1, v2, r, g, b, alpha) {
+  let minX = Math.max(0, Math.floor(Math.min(v0.sx, v1.sx, v2.sx)))
+  let maxX = Math.min(w - 1, Math.ceil(Math.max(v0.sx, v1.sx, v2.sx)))
+  let minY = Math.max(0, Math.floor(Math.min(v0.sy, v1.sy, v2.sy)))
+  let maxY = Math.min(h - 1, Math.ceil(Math.max(v0.sy, v1.sy, v2.sy)))
+  const denom = (v1.sy - v2.sy) * (v0.sx - v2.sx) + (v2.sx - v1.sx) * (v0.sy - v2.sy)
+  if (Math.abs(denom) < 1e-10) return
+  for (let y = minY; y <= maxY; y++) {
+    for (let x = minX; x <= maxX; x++) {
+      const w0 = ((v1.sy - v2.sy) * (x - v2.sx) + (v2.sx - v1.sx) * (y - v2.sy)) / denom
+      const w1 = ((v2.sy - v0.sy) * (x - v2.sx) + (v0.sx - v2.sx) * (y - v2.sy)) / denom
+      const w2 = 1 - w0 - w1
+      if (w0 < -0.001 || w1 < -0.001 || w2 < -0.001) continue
+      const i = (y * w + x) * 4
+      pixels[i] = Math.round(pixels[i] * (1 - alpha) + r * alpha)
+      pixels[i+1] = Math.round(pixels[i+1] * (1 - alpha) + g * alpha)
+      pixels[i+2] = Math.round(pixels[i+2] * (1 - alpha) + b * alpha)
+      pixels[i+3] = 255
     }
   }
 }
@@ -2047,7 +2089,7 @@ export function renderSolidSheet(graphic, width = IMG_W, height = IMG_H, instanc
   const views = Array.isArray(opts.views) && opts.views.length === 4 ? opts.views : ['top', 'iso', 'front', 'right']
   const qw = Math.floor(width / 2)
   const qh = Math.floor(height / 2)
-  const solidOpts = { colors: opts.colors, section: opts.section, highlight: opts.highlight, markers: opts.markers }
+  const solidOpts = { colors: opts.colors, section: opts.section, highlight: opts.highlight, markers: opts.markers, xray: opts.xray, annotate: opts.annotate }
 
   // Pass 1: auto-fit render per view to learn each frame.
   const firstPass = views.map(view => {
@@ -2262,6 +2304,9 @@ export function diffImages(a, b, opts = {}) {
  * @param {string} [options.view='iso'] — one of VIEW_NAMES
  * @param {number} [options.zoom=1]
  * @param {[number,number,number]} [options.lookAt]
+ * @param {boolean} [options.xray] — translucent bodies (fixed-alpha painter's
+ *   blend): hidden bodies and internal far walls shine through, edges stay
+ *   opaque. Quick internal check without choosing a section plane.
  * @param {boolean} [options.annotate] — measurement overlay on the solid render:
  *   bounding-box extents (model units), RGB axes triad for the current view,
  *   and a scale bar. A snapshot that answers "how big is this?" by itself.
@@ -2334,7 +2379,7 @@ export async function renderSessionData(source, options = {}) {
       })
       if (sheet) out.push({ type: 'sheet', kind: 'pixels', ...sheet })
     } else {
-      const zbuf = renderSolidZBuffer(solidOnly, width, height, instances, { colors: options.colors ?? 'native', section: options.section, highlight: options.highlight, markers: options.markers, overlays: sketchOverlays ?? undefined, annotate: options.annotate })
+      const zbuf = renderSolidZBuffer(solidOnly, width, height, instances, { colors: options.colors ?? 'native', section: options.section, highlight: options.highlight, markers: options.markers, overlays: sketchOverlays ?? undefined, annotate: options.annotate, xray: options.xray, xrayAlpha: options.xrayAlpha })
       if (zbuf) out.push({ type: 'solid', kind: 'pixels', ...zbuf })
     }
   }
