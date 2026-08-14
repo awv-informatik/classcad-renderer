@@ -90,16 +90,66 @@ function project(x, y, z) {
   return _project(x, y, z)
 }
 
+// ── Generalized orthographic camera ──
+// Beyond the named view-cube views, `view` accepts an arbitrary camera:
+//   { azimuth, elevation }        — turntable angles in DEGREES. azimuth 0 =
+//     front (camera at -Y), 90 = camera at +X, CCW about +Z; elevation 0 =
+//     horizon, 90 = straight down (top). World is Z-up.
+//   { direction: [x,y,z], up? }   — explicit look direction (from camera toward
+//     the scene), optional up hint (default [0,0,1]).
+// Both build a standard right-handed photographic camera basis. Note: the
+// NAMED views follow CAD drawing conventions and are kept byte-stable; a
+// vector camera aimed like a named view may differ in handedness (e.g.
+// 'right' vs { azimuth: 90 } are mirror images — drawing vs photo convention).
+function projectionFromCamera(v) {
+  let dir = null
+  if (Array.isArray(v.direction) && v.direction.length === 3) {
+    dir = v.direction
+  } else if (typeof v.azimuth === 'number' || typeof v.elevation === 'number') {
+    const az = ((v.azimuth ?? 0) * Math.PI) / 180
+    const el = ((v.elevation ?? 0) * Math.PI) / 180
+    // Camera sits at (sin az · cos el, -cos az · cos el, sin el) and looks at the origin.
+    dir = [-Math.sin(az) * Math.cos(el), Math.cos(az) * Math.cos(el), -Math.sin(el)]
+  }
+  if (!dir) return null
+  const flen = Math.hypot(dir[0], dir[1], dir[2])
+  if (flen < 1e-12) return null
+  const f = [dir[0] / flen, dir[1] / flen, dir[2] / flen]
+  let up = Array.isArray(v.up) && v.up.length === 3 ? v.up : [0, 0, 1]
+  // Degenerate up (parallel to the look direction) → fall back to +Y, which
+  // reproduces the named top/bottom views exactly.
+  if (Math.abs(f[0] * up[0] + f[1] * up[1] + f[2] * up[2]) > 0.999 * Math.hypot(up[0], up[1], up[2])) {
+    up = [0, 1, 0]
+  }
+  const rx = f[1] * up[2] - f[2] * up[1]
+  const ry = f[2] * up[0] - f[0] * up[2]
+  const rz = f[0] * up[1] - f[1] * up[0]
+  const rlen = Math.hypot(rx, ry, rz) || 1
+  const r = [rx / rlen, ry / rlen, rz / rlen]
+  const u = [r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]]
+  // screen = [right, up, depth]; larger depth = closer to the camera.
+  return (x, y, z) => [
+    r[0] * x + r[1] * y + r[2] * z,
+    u[0] * x + u[1] * y + u[2] * z,
+    -(f[0] * x + f[1] * y + f[2] * z),
+  ]
+}
+
 /**
  * Configure viewport for the next render. Called at the start of renderSession.
  * @param {object} opts
- * @param {string} [opts.view='iso'] — one of VIEW_NAMES
+ * @param {string|object} [opts.view='iso'] — one of VIEW_NAMES, or a camera
+ *   object: { azimuth, elevation } (degrees) or { direction: [x,y,z], up? }
  * @param {number} [opts.zoom=1] — multiplier on the auto-fit scale
  * @param {[number,number,number]|null} [opts.lookAt=null] — 3D point that lands at screen center
  */
 export function setViewport(opts = {}) {
-  const viewName = opts.view ?? 'iso'
-  _project = VIEWS[viewName] ?? projectIso
+  const v = opts.view
+  if (v && typeof v === 'object') {
+    _project = projectionFromCamera(v) ?? projectIso
+  } else {
+    _project = VIEWS[v ?? 'iso'] ?? projectIso
+  }
   _zoom = (typeof opts.zoom === 'number' && opts.zoom > 0) ? opts.zoom : 1
   _lookAt = Array.isArray(opts.lookAt) && opts.lookAt.length === 3 ? opts.lookAt : null
 }
@@ -339,6 +389,25 @@ function tessellateArc(start, end, center, n = 64, mid = null, bulge = null) {
 // SOLID RENDERER — from graphic data
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ── Color modes ──
+// 'native' (DEFAULT): use the model's own ClassCAD colors — mesh-level material
+//   first, then the container material (appearance settings, imported colors).
+//   Bodies that share a color look identical; that is faithful to the model.
+// 'distinct': ignore materials and give every body its own palette color —
+//   choose this when you need to tell bodies apart (booleans, splits, patterns,
+//   assemblies with identical parts).
+// Fallback: native mode falls back to the palette when no material is present.
+export const COLOR_MODES = ['native', 'distinct']
+
+// Normalize a material color to [0..1] multipliers (engine sends 0–255 ints,
+// synthetic/test data may already be 0..1).
+function materialRgb(mat) {
+  const c = mat?.color
+  if (!Array.isArray(c) || c.length < 3 || c.some(v => typeof v !== 'number')) return null
+  const m = Math.max(c[0], c[1], c[2])
+  return m > 1 ? [c[0] / 255, c[1] / 255, c[2] / 255] : [c[0], c[1], c[2]]
+}
+
 // Per-body color palettes: [r, g, b] base multipliers for distinct body identification
 const BODY_PALETTES = [
   [0.55, 0.65, 1.0],   // blue
@@ -358,7 +427,7 @@ const BODY_PALETTES = [
  * of the same part share a color.
  * Returns { pixels: Buffer (RGBA), width, height } or null if no geometry.
  */
-export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, instances = null) {
+export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, instances = null, colorMode = 'native') {
   const allPts2d = []
   const tris = []  // { v0, v1, v2 (screen+depth), r, g, b }
   const edgeLines = []
@@ -366,8 +435,12 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
   const drawList = buildDrawList(graphic, instances)
   for (const draw of drawList) {
     const { container, transform, paletteIdx } = draw
-    const palette = BODY_PALETTES[paletteIdx % BODY_PALETTES.length]
+    const fallback = BODY_PALETTES[paletteIdx % BODY_PALETTES.length]
     for (const mesh of (container.meshes || [])) {
+      // native: model's own colors (mesh material > container material > palette)
+      const palette = colorMode === 'distinct'
+        ? fallback
+        : materialRgb(mesh.material) ?? materialRgb(container.properties?.material) ?? fallback
       const verts = mesh.vertices, norms = mesh.normals, indices = mesh.indices
       for (let i = 0; i < indices.length; i += 3) {
         const tv = []
@@ -500,7 +573,7 @@ function _rasterLine(pixels, zBuf, w, h, p0, p1, color, zBias = 0) {
 }
 
 // Legacy SVG renderer (kept for sketch/curve paths)
-export function renderSolidSVG(graphic, width = IMG_W, height = IMG_H, instances = null) {
+export function renderSolidSVG(graphic, width = IMG_W, height = IMG_H, instances = null, colorMode = 'native') {
   const allPts2d = []
   const triangles = []
   const edges = []
@@ -508,8 +581,11 @@ export function renderSolidSVG(graphic, width = IMG_W, height = IMG_H, instances
   const drawList = buildDrawList(graphic, instances)
   for (const draw of drawList) {
     const { container, transform, paletteIdx } = draw
-    const palette = BODY_PALETTES[paletteIdx % BODY_PALETTES.length]
+    const fallback = BODY_PALETTES[paletteIdx % BODY_PALETTES.length]
     for (const mesh of (container.meshes || [])) {
+      const palette = colorMode === 'distinct'
+        ? fallback
+        : materialRgb(mesh.material) ?? materialRgb(container.properties?.material) ?? fallback
       const verts = mesh.vertices, norms = mesh.normals, indices = mesh.indices
       for (let i = 0; i < indices.length; i += 3) {
         const triVerts = []
@@ -1606,6 +1682,10 @@ export function analyzeSession(tree) {
  * @param {string} [options.view='iso'] — one of VIEW_NAMES
  * @param {number} [options.zoom=1]
  * @param {[number,number,number]} [options.lookAt]
+ * @param {'native'|'distinct'} [options.colors='native'] — 'native' renders the
+ *   model's OWN ClassCAD colors (mesh/container materials); 'distinct' gives
+ *   every body its own palette color — use it to tell bodies apart (booleans,
+ *   splits, patterns, repeated parts).
  * @returns {Promise<Array>} entries:
  *   { type: 'solid',   kind: 'pixels', pixels, width, height }
  *   { type: 'sketch',  kind: 'svg', svg, sketchId, name }
@@ -1625,7 +1705,7 @@ export async function renderSessionData(source, options = {}) {
   if (content.solids.length > 0 && graphic?.containers?.some(c => c.type === 1 && c.meshes?.length > 0)) {
     const solidOnly = { ...graphic, containers: graphic.containers.filter(c => c.type === 1 && c.meshes?.length > 0) }
     const instances = extractAssemblyInstances(tree)
-    const zbuf = renderSolidZBuffer(solidOnly, width, height, instances)
+    const zbuf = renderSolidZBuffer(solidOnly, width, height, instances, options.colors ?? 'native')
     if (zbuf) out.push({ type: 'solid', kind: 'pixels', ...zbuf })
   }
 
