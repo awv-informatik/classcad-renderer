@@ -498,6 +498,10 @@ function clipPolyToSection(pts, s) {
  *               "which face/edge/body is id N?" visible.
  *   markers   — [{ position: [x,y,z], label?, color? }] probe markers drawn ON
  *               TOP of everything (no depth test): crosshair + optional label.
+ *   overlays  — [{ pts: [[x,y,z],…], color?, dashed? }] world-space polylines
+ *               drawn on top (no depth test), e.g. sketch curves in 3D. Overlay
+ *               points participate in auto-fit, and they alone are enough to
+ *               produce a render (a sketch-only session renders on white).
  * Returns { pixels, width, height, frame } or null if no geometry.
  */
 export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, instances = null, optsOrColorMode = 'native') {
@@ -506,6 +510,7 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
   const section = normalizeSection(opts.section)
   const highlightIds = Array.isArray(opts.highlight) && opts.highlight.length ? new Set(opts.highlight.map(Number)) : null
   const HIGHLIGHT_RGB = [1.0, 0.45, 0.05] // signal orange
+  const overlays = Array.isArray(opts.overlays) ? opts.overlays.filter(o => Array.isArray(o?.pts) && o.pts.length >= 2) : []
 
   const allPts2d = []
   const tris = []  // { v0, v1, v2 (screen+depth), r, g, b }
@@ -624,6 +629,17 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
     }
   }
 
+  // Overlay polylines participate in the fit (and can carry it alone).
+  const overlayProj = overlays.map(o => ({
+    color: Array.isArray(o.color) && o.color.length === 3 ? o.color : [0, 90, 220],
+    dashed: !!o.dashed,
+    pts: o.pts.map(([x, y, z]) => {
+      const [px, py, pz] = project(x, y, z)
+      allPts2d.push([px, py])
+      return { px, py, pz }
+    }),
+  }))
+
   if (allPts2d.length === 0) return null
   const xf = viewTransform(allPts2d, width, height)
 
@@ -649,6 +665,35 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
         _rasterLine(pixels, zBuf, width, height, { ...sv[i], sy: sv[i].sy + 1 }, { ...sv[i+1], sy: sv[i+1].sy + 1 }, hlColor, 2)
       } else {
         _rasterLine(pixels, zBuf, width, height, sv[i], sv[i+1], edgeColor, 0.5)
+      }
+    }
+  }
+
+  // Overlay polylines — always on top (huge z-bias defeats the depth test).
+  for (const ov of overlayProj) {
+    const col = { r: ov.color[0], g: ov.color[1], b: ov.color[2] }
+    const sv = ov.pts.map(v => { const [sx, sy] = xf(v.px, v.py); return { sx, sy, sz: v.pz } })
+    let dashAcc = 0
+    for (let i = 0; i < sv.length - 1; i++) {
+      if (ov.dashed) {
+        // 6-on / 4-off screen-space dashing, phase carried along the polyline.
+        const segLen = Math.hypot(sv[i+1].sx - sv[i].sx, sv[i+1].sy - sv[i].sy)
+        let t = 0
+        while (t < segLen) {
+          const phase = (dashAcc + t) % 10
+          const runLen = phase < 6 ? Math.min(6 - phase, segLen - t) : Math.min(10 - phase, segLen - t)
+          if (phase < 6 && runLen > 0.2) {
+            const t0 = t / segLen, t1 = (t + runLen) / segLen
+            _rasterLine(pixels, zBuf, width, height,
+              { sx: sv[i].sx + (sv[i+1].sx - sv[i].sx) * t0, sy: sv[i].sy + (sv[i+1].sy - sv[i].sy) * t0, sz: sv[i].sz },
+              { sx: sv[i].sx + (sv[i+1].sx - sv[i].sx) * t1, sy: sv[i].sy + (sv[i+1].sy - sv[i].sy) * t1, sz: sv[i+1].sz },
+              col, 1e9)
+          }
+          t += runLen
+        }
+        dashAcc = (dashAcc + segLen) % 10
+      } else {
+        _rasterLine(pixels, zBuf, width, height, sv[i], sv[i+1], col, 1e9)
       }
     }
   }
@@ -2004,6 +2049,81 @@ export function renderSolidSheet(graphic, width = IMG_W, height = IMG_H, instanc
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// SKETCH → 3D OVERLAY — sketch curves as world-space polylines on the solid
+// ═══════════════════════════════════════════════════════════════════════════
+
+function _rodrigues(v, n, theta) {
+  const c = Math.cos(theta), s = Math.sin(theta)
+  const dot = n[0]*v[0] + n[1]*v[1] + n[2]*v[2]
+  const cx = [n[1]*v[2] - n[2]*v[1], n[2]*v[0] - n[0]*v[2], n[0]*v[1] - n[1]*v[0]]
+  return [
+    v[0]*c + cx[0]*s + n[0]*dot*(1-c),
+    v[1]*c + cx[1]*s + n[1]*dot*(1-c),
+    v[2]*c + cx[2]*s + n[2]*dot*(1-c),
+  ]
+}
+
+const _unit = v => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0]/l, v[1]/l, v[2]/l] }
+const _p3 = p => [p?.x ?? 0, p?.y ?? 0, p?.z ?? 0]
+
+/**
+ * Turn one sketch's geometry (fetchSketchData items — WORLD coordinates) into
+ * 3D overlay polylines for renderSolidZBuffer. Circles/arcs are tessellated in
+ * the sketch plane, taken from the sketch node's coordinateSystem
+ * ([origin, xDir, yDir, zDir]); arcs sweep by their signed bulge about the
+ * plane normal. Construction geometry renders dashed violet.
+ */
+export function sketchToOverlays(items, sketchNode) {
+  const cs = Array.isArray(sketchNode?.coordinateSystem) && sketchNode.coordinateSystem.length >= 4
+    ? sketchNode.coordinateSystem
+    : [[0,0,0],[1,0,0],[0,1,0],[0,0,1]]
+  const u = _unit(cs[1]), v = _unit(cs[2]), n = _unit(cs[3])
+  const N = 48
+  const overlays = []
+  const colorFor = it => it.isConstruction ? [166, 77, 255] : [0, 90, 220]
+
+  for (const it of (items || [])) {
+    if (it.type === 'line') {
+      overlays.push({ pts: [_p3(it.startPos), _p3(it.endPos)], color: colorFor(it), dashed: !!it.isConstruction })
+    } else if (it.type === 'circle' && it.radius != null) {
+      const c = _p3(it.center)
+      const pts = []
+      for (let i = 0; i <= N; i++) {
+        const a = (2 * Math.PI * i) / N
+        pts.push([
+          c[0] + it.radius * (Math.cos(a) * u[0] + Math.sin(a) * v[0]),
+          c[1] + it.radius * (Math.cos(a) * u[1] + Math.sin(a) * v[1]),
+          c[2] + it.radius * (Math.cos(a) * u[2] + Math.sin(a) * v[2]),
+        ])
+      }
+      overlays.push({ pts, color: colorFor(it), dashed: !!it.isConstruction })
+    } else if (it.type === 'arc') {
+      const c = _p3(it.centerPos), s = _p3(it.startPos), e = _p3(it.endPos)
+      const v0 = [s[0]-c[0], s[1]-c[1], s[2]-c[2]]
+      let theta
+      if (it.bulge != null && Number.isFinite(it.bulge) && Math.abs(it.bulge) > 1e-9) {
+        theta = 4 * Math.atan(it.bulge) // signed sweep about +n
+      } else {
+        // Fallback: minor arc via plane angles.
+        const ve = [e[0]-c[0], e[1]-c[1], e[2]-c[2]]
+        const a0 = Math.atan2(v0[0]*v[0]+v0[1]*v[1]+v0[2]*v[2], v0[0]*u[0]+v0[1]*u[1]+v0[2]*u[2])
+        const a1 = Math.atan2(ve[0]*v[0]+ve[1]*v[1]+ve[2]*v[2], ve[0]*u[0]+ve[1]*u[1]+ve[2]*u[2])
+        theta = a1 - a0
+        if (theta > Math.PI) theta -= 2 * Math.PI
+        if (theta < -Math.PI) theta += 2 * Math.PI
+      }
+      const pts = []
+      for (let i = 0; i <= N; i++) {
+        const r = _rodrigues(v0, n, (theta * i) / N)
+        pts.push([c[0] + r[0], c[1] + r[1], c[2] + r[2]])
+      }
+      overlays.push({ pts, color: colorFor(it), dashed: !!it.isConstruction })
+    }
+  }
+  return overlays
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // IMAGE DIFF — for before/after verification with a pinned frame
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -2083,6 +2203,11 @@ export function diffImages(a, b, opts = {}) {
  * @param {string} [options.view='iso'] — one of VIEW_NAMES
  * @param {number} [options.zoom=1]
  * @param {[number,number,number]} [options.lookAt]
+ * @param {boolean} [options.sketchOverlay] — draw every sketch's curves in 3D
+ *   (world space, on the sketch plane) ON TOP of the solid render — verifies a
+ *   sketch sits on the intended plane at the intended place. Construction
+ *   geometry dashes violet. Needs `execute`. Without solid geometry the
+ *   overlay renders standalone.
  * @param {number[]} [options.highlight] — ids rendered in SIGNAL ORANGE/RED:
  *   graphic container ids, owning solid ids (container.owner), face mesh ids,
  *   edge ids. Makes "which face/edge/body is id N?" visible.
@@ -2118,6 +2243,20 @@ export async function renderSessionData(source, options = {}) {
   setViewport({ view: options.view, zoom: options.zoom, lookAt: options.lookAt, frame: options.frame })
   const content = analyzeSession(tree)
 
+  // ── SKETCH OVERLAYS (3D) ── collect before solids so they render INTO the
+  // solid image; with no solid geometry they render standalone on white.
+  let sketchOverlays = null
+  if (options.sketchOverlay && execute) {
+    sketchOverlays = []
+    for (const sketchId of content.sketches) {
+      try {
+        const data = await fetchSketchData(task => execute(task), sketchId, tree)
+        if (data?.items?.length) sketchOverlays.push(...sketchToOverlays(data.items, tree[String(sketchId)]))
+      } catch (e) { /* skip empty/inaccessible sketch */ }
+    }
+    if (!sketchOverlays.length) sketchOverlays = null
+  }
+
   // ── SOLIDS ── (type-1 containers with meshes; assemblies get per-instance transforms)
   if (content.solids.length > 0 && graphic?.containers?.some(c => c.type === 1 && c.meshes?.length > 0)) {
     const solidOnly = { ...graphic, containers: graphic.containers.filter(c => c.type === 1 && c.meshes?.length > 0) }
@@ -2133,9 +2272,15 @@ export async function renderSessionData(source, options = {}) {
       })
       if (sheet) out.push({ type: 'sheet', kind: 'pixels', ...sheet })
     } else {
-      const zbuf = renderSolidZBuffer(solidOnly, width, height, instances, { colors: options.colors ?? 'native', section: options.section, highlight: options.highlight, markers: options.markers })
+      const zbuf = renderSolidZBuffer(solidOnly, width, height, instances, { colors: options.colors ?? 'native', section: options.section, highlight: options.highlight, markers: options.markers, overlays: sketchOverlays ?? undefined })
       if (zbuf) out.push({ type: 'solid', kind: 'pixels', ...zbuf })
     }
+  }
+
+  // Sketch overlay without solid geometry → standalone 3D sketch view.
+  if (sketchOverlays && !(content.solids.length > 0 && graphic?.containers?.some(c => c.type === 1 && c.meshes?.length > 0))) {
+    const zbuf = renderSolidZBuffer({ containers: [] }, width, height, null, { overlays: sketchOverlays, markers: options.markers })
+    if (zbuf) out.push({ type: 'solid', kind: 'pixels', ...zbuf })
   }
 
   // ── SKETCHES ──

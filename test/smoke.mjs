@@ -308,6 +308,30 @@ assert.ok(leftHit && rightHit, `assembly places both instances (left ${leftHit},
   assert.ok(Buffer.compare(Buffer.from(mk.pixels), Buffer.from(mk2.pixels)) === 0, 'markers deterministic')
 }
 
+// 5a6. Sketch overlay in 3D: blue curve pixels on top of the solid render
+{
+  tree['40'].coordinateSystem = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
+  const bluePx = px => {
+    let n = 0
+    for (let i = 0; i < px.length; i += 4) {
+      if (px[i] === 0 && px[i+1] === 90 && px[i+2] === 220) n++
+    }
+    return n
+  }
+  const [plain] = await renderSessionData({ tree, graphic, execute: fakeExecute }, { width: 200, height: 150 })
+  const withOv = await renderSessionData({ tree, graphic, execute: fakeExecute }, { width: 200, height: 150, sketchOverlay: true })
+  const ovSolid = withOv.find(e => e.type === 'solid')
+  assert.ok(bluePx(plain.pixels) === 0, 'no overlay color without the option')
+  assert.ok(bluePx(ovSolid.pixels) > 50, `sketch curves drawn in 3D (${bluePx(ovSolid.pixels)} px)`)
+  // Standalone: no solid graphic → overlay renders on white
+  const solo = await renderSessionData({ tree, graphic: { containers: [] }, execute: fakeExecute }, { width: 200, height: 150, sketchOverlay: true })
+  const soloSolid = solo.find(e => e.type === 'solid')
+  assert.ok(soloSolid && bluePx(soloSolid.pixels) > 50, 'overlay renders standalone without solids')
+  // Deterministic
+  const withOv2 = await renderSessionData({ tree, graphic, execute: fakeExecute }, { width: 200, height: 150, sketchOverlay: true })
+  assert.ok(Buffer.compare(Buffer.from(ovSolid.pixels), Buffer.from(withOv2.find(e => e.type === 'solid').pixels)) === 0, 'overlay deterministic')
+}
+
 // 5b. Generalized camera: named-view equivalences + arbitrary views
 {
   const px = async view => (await renderSessionData({ tree, graphic }, { width: 200, height: 150, view }))[0].pixels
