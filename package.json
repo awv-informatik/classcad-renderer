@@ -1,7 +1,7 @@
 {
   "name": "@classcad/renderer",
   "version": "0.1.0",
-  "description": "Deterministic renderer for ClassCAD session data — solids (z-buffer, assembly transforms), constrained sketches (dimensions, constraints, label de-overlap), curves, and work geometry. Fixed CAD views (iso/top/front/…), auto-fit, reproducible output. Portable core (browser + Node) with adapters for PNG encoding.",
+  "description": "Deterministic renderer for ClassCAD session data \u2014 solids (z-buffer, assembly transforms), constrained sketches (dimensions, constraints, label de-overlap), curves, and work geometry. Fixed CAD views (iso/top/front/\u2026), auto-fit, reproducible output. Portable core (browser + Node) with adapters for PNG encoding.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -21,18 +21,34 @@
   "type": "module",
   "main": "src/index.mjs",
   "exports": {
-    ".": "./src/index.mjs",
-    "./core": "./src/core.mjs",
-    "./node": "./src/node.mjs",
-    "./browser": "./src/browser.mjs",
-    "./stl": "./src/stl.mjs"
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/index.mjs"
+    },
+    "./core": {
+      "types": "./types/index.d.ts",
+      "default": "./src/core.mjs"
+    },
+    "./node": {
+      "types": "./types/index.d.ts",
+      "default": "./src/node.mjs"
+    },
+    "./browser": {
+      "types": "./types/index.d.ts",
+      "default": "./src/browser.mjs"
+    },
+    "./stl": {
+      "types": "./types/index.d.ts",
+      "default": "./src/stl.mjs"
+    }
   },
   "files": [
     "src",
+    "types",
     "README.md"
   ],
   "scripts": {
-    "test": "node test/smoke.mjs"
+    "test": "node test/smoke.mjs && node test/golden.mjs"
   },
   "peerDependencies": {
     "sharp": "^0.34.0"
@@ -50,5 +66,6 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "types": "types/index.d.ts"
 }
