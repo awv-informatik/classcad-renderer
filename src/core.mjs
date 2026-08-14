@@ -2178,7 +2178,39 @@ export function sketchToOverlays(items, sketchNode) {
   const cs = Array.isArray(sketchNode?.coordinateSystem) && sketchNode.coordinateSystem.length >= 4
     ? sketchNode.coordinateSystem
     : [[0,0,0],[1,0,0],[0,1,0],[0,0,1]]
-  const u = _unit(cs[1]), v = _unit(cs[2]), n = _unit(cs[3])
+  // Plane basis. The sketch node's coordinateSystem is NOT reliable for
+  // plane-referenced sketches (it can stay identity), so derive the plane
+  // NORMAL from the geometry itself: the cross product of two independent
+  // in-plane direction vectors (line directions, arc radius vectors). Fall
+  // back to the node cs when the sketch has no such directions (circle-only).
+  const dirs = []
+  for (const it of (items || [])) {
+    if (it.type === 'line') {
+      const s = _p3(it.startPos), e = _p3(it.endPos)
+      dirs.push([e[0]-s[0], e[1]-s[1], e[2]-s[2]])
+    } else if (it.type === 'arc') {
+      const c = _p3(it.centerPos)
+      for (const p of [it.startPos, it.endPos]) {
+        const w = _p3(p)
+        dirs.push([w[0]-c[0], w[1]-c[1], w[2]-c[2]])
+      }
+    }
+  }
+  let derived = null
+  let best = 1e-9
+  for (let i = 0; i < dirs.length; i++) {
+    for (let j = i + 1; j < dirs.length; j++) {
+      const a = dirs[i], b = dirs[j]
+      const cx = [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
+      const norm = Math.hypot(cx[0], cx[1], cx[2])
+      if (norm > best) { best = norm; derived = cx }
+    }
+  }
+  const n = derived ? _unit(derived) : _unit(cs[3])
+  // Any orthonormal in-plane pair works for circles (rotation-symmetric).
+  let ref = Math.abs(n[2]) < 0.9 ? [0, 0, 1] : [0, 1, 0]
+  const u = _unit([n[1]*ref[2]-n[2]*ref[1], n[2]*ref[0]-n[0]*ref[2], n[0]*ref[1]-n[1]*ref[0]])
+  const v = [n[1]*u[2]-n[2]*u[1], n[2]*u[0]-n[0]*u[2], n[0]*u[1]-n[1]*u[0]]
   const N = 48
   const overlays = []
   const colorFor = it => it.isConstruction ? [166, 77, 255] : [0, 90, 220]
