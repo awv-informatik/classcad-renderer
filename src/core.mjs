@@ -749,7 +749,7 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
         const y = Math.round(cy + (R - 2) * Math.sin((a * Math.PI) / 16))
         put(x, y)
       }
-      if (m.label) drawText(pixels, width, height, cx + R + 3, cy - 3, m.label, col, 1)
+      if (m.label) drawText(pixels, width, height, cx + R + 4, cy - 6, m.label, col, 2)
     }
   }
 
