@@ -221,6 +221,49 @@ assert.ok(leftHit && rightHit, `assembly places both instances (left ${leftHit},
   assert.ok(dU.bbox.minX < firstCubeMaxX - 3, `unpinned diff pollutes the unchanged region (minX ${dU.bbox.minX})`)
 }
 
+// 5a4. Four-view sheet: quadrants populated, ortho views share one scale
+{
+  const [sheet] = await renderSessionData({ tree, graphic }, { width: 400, height: 300, sheet: true, colors: 'distinct' })
+  assert.equal(sheet.type, 'sheet')
+  assert.equal(sheet.pixels.length, 400 * 300 * 4)
+  // Body pixels in every quadrant (cube colors, not just labels/dividers)
+  const quadHasBody = (ox, oy) => {
+    for (let y = oy + 30; y < oy + 150; y++) for (let x = ox + 30; x < ox + 200; x++) {
+      const i = (y * 400 + x) * 4
+      const [r, g, b] = [sheet.pixels[i], sheet.pixels[i+1], sheet.pixels[i+2]]
+      if (!(r === 255 && g === 255 && b === 255) && !(r === g && g === b)) return true
+    }
+    return false
+  }
+  assert.ok(quadHasBody(0, 0) && quadHasBody(200, 0) && quadHasBody(0, 150) && quadHasBody(200, 150),
+    'all four quadrants show the model')
+  // Shared ortho scale: the 10-cube's silhouette width must match in TOP (TL)
+  // and FRONT (BL) quadrants.
+  const bodyWidth = (ox, oy) => {
+    let min = Infinity, max = -Infinity
+    for (let y = oy; y < oy + 150; y++) for (let x = ox; x < ox + 200; x++) {
+      const i = (y * 400 + x) * 4
+      const [r, g, b] = [sheet.pixels[i], sheet.pixels[i+1], sheet.pixels[i+2]]
+      if (!(r === 255 && g === 255 && b === 255) && !(r === g && g === b)) { if (x < min) min = x; if (x > max) max = x }
+    }
+    return max - min
+  }
+  const wTop = bodyWidth(0, 20), wFront = bodyWidth(0, 170)
+  assert.ok(Math.abs(wTop - wFront) <= 2, `ortho quadrants share scale (top ${wTop}px vs front ${wFront}px)`)
+  // Labels drawn (dark grey pixels in the label corner)
+  let labelPx = 0
+  for (let y = 8; y < 24; y++) for (let x = 8; x < 60; x++) {
+    const i = (y * 400 + x) * 4
+    if (sheet.pixels[i] === 70 && sheet.pixels[i+1] === 70) labelPx++
+  }
+  assert.ok(labelPx > 20, `quadrant label rendered (${labelPx} px)`)
+  // Deterministic + custom view list works
+  const [sheet2] = await renderSessionData({ tree, graphic }, { width: 400, height: 300, sheet: true, colors: 'distinct' })
+  assert.ok(Buffer.compare(Buffer.from(sheet.pixels), Buffer.from(sheet2.pixels)) === 0, 'sheet deterministic')
+  const [sheetC] = await renderSessionData({ tree, graphic }, { width: 400, height: 300, sheet: ['iso', 'back', 'left', 'bottom'], colors: 'distinct' })
+  assert.ok(sheetC && Buffer.compare(Buffer.from(sheet.pixels), Buffer.from(sheetC.pixels)) !== 0, 'custom view list changes the sheet')
+}
+
 // 5b. Generalized camera: named-view equivalences + arbitrary views
 {
   const px = async view => (await renderSessionData({ tree, graphic }, { width: 200, height: 150, view }))[0].pixels

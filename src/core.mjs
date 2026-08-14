@@ -1787,6 +1787,174 @@ export function analyzeSession(tree) {
 
 
 // ═══════════════════════════════════════════════════════════════════════════
+// RASTER TEXT — minimal 5×7 bitmap font for labels (sheet titles, markers,
+// annotations). Deterministic, dependency-free.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const FONT5X7 = {
+  A: ['.XX.','X..X','X..X','XXXX','X..X','X..X','X..X'],
+  B: ['XXX.','X..X','X..X','XXX.','X..X','X..X','XXX.'],
+  C: ['.XX.','X..X','X...','X...','X...','X..X','.XX.'],
+  D: ['XXX.','X..X','X..X','X..X','X..X','X..X','XXX.'],
+  E: ['XXXX','X...','X...','XXX.','X...','X...','XXXX'],
+  F: ['XXXX','X...','X...','XXX.','X...','X...','X...'],
+  G: ['.XX.','X..X','X...','X.XX','X..X','X..X','.XXX'],
+  H: ['X..X','X..X','X..X','XXXX','X..X','X..X','X..X'],
+  I: ['XXX','.X.','.X.','.X.','.X.','.X.','XXX'],
+  J: ['..XX','...X','...X','...X','...X','X..X','.XX.'],
+  K: ['X..X','X.X.','XX..','X...','XX..','X.X.','X..X'],
+  L: ['X...','X...','X...','X...','X...','X...','XXXX'],
+  M: ['X...X','XX.XX','X.X.X','X.X.X','X...X','X...X','X...X'],
+  N: ['X..X','XX.X','XX.X','X.XX','X.XX','X..X','X..X'],
+  O: ['.XX.','X..X','X..X','X..X','X..X','X..X','.XX.'],
+  P: ['XXX.','X..X','X..X','XXX.','X...','X...','X...'],
+  Q: ['.XX.','X..X','X..X','X..X','X.XX','X..X','.XXX'],
+  R: ['XXX.','X..X','X..X','XXX.','XX..','X.X.','X..X'],
+  S: ['.XXX','X...','X...','.XX.','...X','...X','XXX.'],
+  T: ['XXXXX','..X..','..X..','..X..','..X..','..X..','..X..'],
+  U: ['X..X','X..X','X..X','X..X','X..X','X..X','.XX.'],
+  V: ['X...X','X...X','X...X','.X.X.','.X.X.','.X.X.','..X..'],
+  W: ['X...X','X...X','X...X','X.X.X','X.X.X','XX.XX','X...X'],
+  X: ['X...X','.X.X.','..X..','..X..','..X..','.X.X.','X...X'],
+  Y: ['X...X','.X.X.','..X..','..X..','..X..','..X..','..X..'],
+  Z: ['XXXX','...X','..X.','.X..','X...','X...','XXXX'],
+  '0': ['.XX.','X..X','X.XX','XX.X','X..X','X..X','.XX.'],
+  '1': ['.X.','XX.','.X.','.X.','.X.','.X.','XXX'],
+  '2': ['.XX.','X..X','...X','..X.','.X..','X...','XXXX'],
+  '3': ['XXX.','...X','...X','.XX.','...X','...X','XXX.'],
+  '4': ['..X.','.XX.','X.X.','XXXX','..X.','..X.','..X.'],
+  '5': ['XXXX','X...','XXX.','...X','...X','X..X','.XX.'],
+  '6': ['.XX.','X...','XXX.','X..X','X..X','X..X','.XX.'],
+  '7': ['XXXX','...X','..X.','..X.','.X..','.X..','.X..'],
+  '8': ['.XX.','X..X','X..X','.XX.','X..X','X..X','.XX.'],
+  '9': ['.XX.','X..X','X..X','.XXX','...X','...X','.XX.'],
+  '.': ['...','...','...','...','...','.X.','.X.'],
+  '-': ['....','....','....','XXXX','....','....','....'],
+  ':': ['...','.X.','.X.','...','.X.','.X.','...'],
+  '/': ['...X','...X','..X.','..X.','.X..','.X..','X...'],
+  ' ': ['...','...','...','...','...','...','...'],
+}
+
+/**
+ * Draw text into an RGBA buffer with the built-in 5×7 font. Uppercases input;
+ * unknown characters render as space. Returns the pixel width drawn.
+ */
+export function drawText(pixels, width, height, x, y, text, color = [40, 40, 40], scale = 1) {
+  let cx = Math.round(x)
+  const cy = Math.round(y)
+  for (const ch of String(text).toUpperCase()) {
+    const glyph = FONT5X7[ch] ?? FONT5X7[' ']
+    const gw = glyph[0].length
+    for (let row = 0; row < glyph.length; row++) {
+      for (let col = 0; col < gw; col++) {
+        if (glyph[row][col] !== 'X') continue
+        for (let sy = 0; sy < scale; sy++) {
+          for (let sx = 0; sx < scale; sx++) {
+            const px = cx + col * scale + sx
+            const py = cy + row * scale + sy
+            if (px < 0 || px >= width || py < 0 || py >= height) continue
+            const i = (py * width + px) * 4
+            pixels[i] = color[0]; pixels[i+1] = color[1]; pixels[i+2] = color[2]; pixels[i+3] = 255
+          }
+        }
+      }
+    }
+    cx += (gw + 1) * scale
+  }
+  return cx - Math.round(x)
+}
+
+/** Measure text width in pixels for the built-in font. */
+export function measureText(text, scale = 1) {
+  let w = 0
+  for (const ch of String(text).toUpperCase()) w += ((FONT5X7[ch] ?? FONT5X7[' '])[0].length + 1) * scale
+  return w
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MULTI-VIEW SHEET — four views in one image (technical-drawing style)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const ORTHO_VIEWS = new Set(['top', 'bottom', 'front', 'back', 'left', 'right'])
+
+/**
+ * Render four views of the solids into ONE image (quadrants TL, TR, BL, BR).
+ * Default layout: top / iso / front / right — third-angle-ish (top above
+ * front, right beside front, iso in the free corner). All ORTHO views share a
+ * COMMON scale (like a technical drawing), the iso quadrant auto-fits itself.
+ * Labels use the built-in font.
+ *
+ * @param {object} graphic — graphic payload (containers)
+ * @param {number} width/height — sheet size
+ * @param {Array|null} instances — assembly instances (see renderSolidZBuffer)
+ * @param {object} [opts] — { views: [tl,tr,bl,br], colors, section }
+ * @returns {{pixels,width,height}|null}
+ */
+export function renderSolidSheet(graphic, width = IMG_W, height = IMG_H, instances = null, opts = {}) {
+  const views = Array.isArray(opts.views) && opts.views.length === 4 ? opts.views : ['top', 'iso', 'front', 'right']
+  const qw = Math.floor(width / 2)
+  const qh = Math.floor(height / 2)
+  const solidOpts = { colors: opts.colors, section: opts.section }
+
+  // Pass 1: auto-fit render per view to learn each frame.
+  const firstPass = views.map(view => {
+    setViewport({ view })
+    return renderSolidZBuffer(graphic, qw, qh, instances, solidOpts)
+  })
+  if (firstPass.every(r => r == null)) return null
+
+  // Common scale across the ortho views (a drawing shares one scale).
+  const orthoScales = views
+    .map((v, i) => (typeof v === 'string' && ORTHO_VIEWS.has(v) && firstPass[i]?.frame ? firstPass[i].frame.scale : null))
+    .filter(s => s != null)
+  const commonScale = orthoScales.length ? Math.min(...orthoScales) : null
+
+  // Pass 2: re-render ortho views pinned to the common scale (own centers).
+  const quads = views.map((view, i) => {
+    const fp = firstPass[i]
+    if (!fp) return null
+    if (typeof view === 'string' && ORTHO_VIEWS.has(view) && commonScale != null && fp.frame && fp.frame.scale !== commonScale) {
+      setViewport({ view, frame: { scale: commonScale, midX: fp.frame.midX, midY: fp.frame.midY } })
+      return renderSolidZBuffer(graphic, qw, qh, instances, solidOpts)
+    }
+    return fp
+  })
+
+  // Composite.
+  const pixels = allocPixels(width * height * 4)
+  const offsets = [[0, 0], [qw, 0], [0, qh], [qw, qh]]
+  for (let q = 0; q < 4; q++) {
+    const quad = quads[q]
+    if (!quad) continue
+    const [ox, oy] = offsets[q]
+    for (let y = 0; y < qh; y++) {
+      const srcRow = y * qw * 4
+      const dstRow = ((y + oy) * width + ox) * 4
+      quad.pixels.copy
+        ? quad.pixels.copy(pixels, dstRow, srcRow, srcRow + qw * 4)
+        : pixels.set(quad.pixels.subarray(srcRow, srcRow + qw * 4), dstRow)
+    }
+  }
+  // Divider lines.
+  const grey = [190, 190, 190]
+  for (let x = 0; x < width; x++) {
+    const i = (qh * width + x) * 4
+    pixels[i] = grey[0]; pixels[i+1] = grey[1]; pixels[i+2] = grey[2]
+  }
+  for (let y = 0; y < height; y++) {
+    const i = (y * width + qw) * 4
+    pixels[i] = grey[0]; pixels[i+1] = grey[1]; pixels[i+2] = grey[2]
+  }
+  // Labels (top-left of each quadrant).
+  for (let q = 0; q < 4; q++) {
+    const [ox, oy] = offsets[q]
+    const name = typeof views[q] === 'string' ? views[q] : 'custom'
+    drawText(pixels, width, height, ox + 8, oy + 8, name, [70, 70, 70], 2)
+  }
+  return { pixels, width, height }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // IMAGE DIFF — for before/after verification with a pinned frame
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1866,6 +2034,10 @@ export function diffImages(a, b, opts = {}) {
  * @param {string} [options.view='iso'] — one of VIEW_NAMES
  * @param {number} [options.zoom=1]
  * @param {[number,number,number]} [options.lookAt]
+ * @param {boolean|string[]} [options.sheet] — render the solids as a FOUR-VIEW
+ *   SHEET (one image, quadrants TL/TR/BL/BR; default top/iso/front/right; the
+ *   ortho views share one scale like a technical drawing). Pass an array of 4
+ *   view names to pick the quadrants. Entry type becomes 'sheet'.
  * @param {{scale:number,midX:number,midY:number}} [options.frame] — pin the view
  *   frame to one returned by an earlier solid render (same view/size) so
  *   before/after images are pixel-comparable; feed both to diffImages.
@@ -1895,8 +2067,18 @@ export async function renderSessionData(source, options = {}) {
   if (content.solids.length > 0 && graphic?.containers?.some(c => c.type === 1 && c.meshes?.length > 0)) {
     const solidOnly = { ...graphic, containers: graphic.containers.filter(c => c.type === 1 && c.meshes?.length > 0) }
     const instances = extractAssemblyInstances(tree)
-    const zbuf = renderSolidZBuffer(solidOnly, width, height, instances, { colors: options.colors ?? 'native', section: options.section })
-    if (zbuf) out.push({ type: 'solid', kind: 'pixels', ...zbuf })
+    if (options.sheet) {
+      // Four views in one image; options.sheet may be an array of 4 views.
+      const sheet = renderSolidSheet(solidOnly, width, height, instances, {
+        views: Array.isArray(options.sheet) ? options.sheet : undefined,
+        colors: options.colors ?? 'native',
+        section: options.section,
+      })
+      if (sheet) out.push({ type: 'sheet', kind: 'pixels', ...sheet })
+    } else {
+      const zbuf = renderSolidZBuffer(solidOnly, width, height, instances, { colors: options.colors ?? 'native', section: options.section })
+      if (zbuf) out.push({ type: 'solid', kind: 'pixels', ...zbuf })
+    }
   }
 
   // ── SKETCHES ──
