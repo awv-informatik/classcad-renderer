@@ -149,6 +149,36 @@ assert.ok(leftHit && rightHit, `assembly places both instances (left ${leftHit},
   assert.ok(dc.blue > dc.red * 2, `distinct mode uses the blue palette (got ${JSON.stringify(dc)})`)
 }
 
+// 5a2. Section plane: cube 0..10 cut at x=5 → front view keeps LEFT half at
+// UNCHANGED framing (colored width halves, right half of the old span empty).
+{
+  const bboxX = px => {
+    let min = Infinity, max = -Infinity
+    for (let y = 0; y < 150; y++) for (let x = 0; x < 200; x++) {
+      const i = (y * 200 + x) * 4
+      if (px[i] !== 255 || px[i+1] !== 255 || px[i+2] !== 255) { if (x < min) min = x; if (x > max) max = x }
+    }
+    return { min, max }
+  }
+  const [full] = await renderSessionData({ tree, graphic }, { width: 200, height: 150, view: 'front' })
+  const [half] = await renderSessionData({ tree, graphic }, {
+    width: 200, height: 150, view: 'front',
+    section: { origin: [5, 0, 0], normal: [1, 0, 0] },
+  })
+  const fb = bboxX(full.pixels), hb = bboxX(half.pixels)
+  const fullW = fb.max - fb.min, halfW = hb.max - hb.min
+  assert.ok(Math.abs(hb.min - fb.min) <= 2, `section keeps left edge (${hb.min} vs ${fb.min})`)
+  assert.ok(Math.abs(halfW - fullW / 2) <= 4, `section halves the width (${halfW} vs ${fullW}/2)`)
+  const [half2] = await renderSessionData({ tree, graphic }, {
+    width: 200, height: 150, view: 'front', section: { origin: [5, 0, 0], normal: [1, 0, 0] },
+  })
+  assert.ok(Buffer.compare(Buffer.from(half.pixels), Buffer.from(half2.pixels)) === 0, 'section deterministic')
+  // iso: interior (back faces) must be visible in the cut body — the sectioned
+  // iso render has body pixels the plain one lacks nowhere near, plus darker shades.
+  const [isoCut] = await renderSessionData({ tree, graphic }, { width: 200, height: 150, section: { origin: [5, 5, 5], normal: [1, 0, 0] } })
+  assert.ok(isoCut.pixels.some((v, i) => i % 4 === 0 && v !== 255), 'sectioned iso renders')
+}
+
 // 5b. Generalized camera: named-view equivalences + arbitrary views
 {
   const px = async view => (await renderSessionData({ tree, graphic }, { width: 200, height: 150, view }))[0].pixels

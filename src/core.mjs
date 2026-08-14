@@ -427,7 +427,57 @@ const BODY_PALETTES = [
  * of the same part share a color.
  * Returns { pixels: Buffer (RGBA), width, height } or null if no geometry.
  */
-export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, instances = null, colorMode = 'native') {
+// ── Section plane ──
+// section: { origin: [x,y,z], normal: [x,y,z] } cuts the model: everything on
+// the POSITIVE side of the plane (dot(p - origin, normal) > 0) is removed.
+// Cut bodies are rendered UNCAPPED — interior walls become visible and are
+// shaded darker (back faces are not culled while a section is active).
+// The view keeps the UNSECTIONED model's framing, so a sectioned and an
+// unsectioned render of the same state are directly comparable.
+function normalizeSection(section) {
+  if (!section || !Array.isArray(section.origin) || !Array.isArray(section.normal)) return null
+  const [nx, ny, nz] = section.normal
+  const len = Math.hypot(nx, ny, nz)
+  if (!(len > 1e-12)) return null
+  return { o: section.origin, n: [nx / len, ny / len, nz / len] }
+}
+
+const _planeDist = (p, s) => (p[0] - s.o[0]) * s.n[0] + (p[1] - s.o[1]) * s.n[1] + (p[2] - s.o[2]) * s.n[2]
+
+// Sutherland-Hodgman: clip a world-space polygon to dot(p-o, n) <= 0.
+function clipPolyToSection(pts, s) {
+  const d = pts.map(p => _planeDist(p, s))
+  const out = []
+  for (let i = 0; i < pts.length; i++) {
+    const j = (i + 1) % pts.length
+    if (d[i] <= 0) out.push(pts[i])
+    if ((d[i] < 0 && d[j] > 0) || (d[i] > 0 && d[j] < 0)) {
+      const t = d[i] / (d[i] - d[j])
+      out.push([
+        pts[i][0] + t * (pts[j][0] - pts[i][0]),
+        pts[i][1] + t * (pts[j][1] - pts[i][1]),
+        pts[i][2] + t * (pts[j][2] - pts[i][2]),
+      ])
+    }
+  }
+  return out
+}
+
+/**
+ * Z-buffer rasterizer for solid rendering. Eliminates all Z-fighting artifacts.
+ * When `instances` is provided (assemblies), each draw applies its world
+ * transform before projection; the palette keys per template, so all copies
+ * of the same part share a color.
+ *
+ * The last parameter is either a color-mode string ('native' | 'distinct') or
+ * an options object: { colors, section } — see normalizeSection above.
+ * Returns { pixels: Buffer (RGBA), width, height } or null if no geometry.
+ */
+export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, instances = null, optsOrColorMode = 'native') {
+  const opts = typeof optsOrColorMode === 'string' ? { colors: optsOrColorMode } : (optsOrColorMode ?? {})
+  const colorMode = opts.colors ?? 'native'
+  const section = normalizeSection(opts.section)
+
   const allPts2d = []
   const tris = []  // { v0, v1, v2 (screen+depth), r, g, b }
   const edgeLines = []
@@ -443,40 +493,97 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
         : materialRgb(mesh.material) ?? materialRgb(container.properties?.material) ?? fallback
       const verts = mesh.vertices, norms = mesh.normals, indices = mesh.indices
       for (let i = 0; i < indices.length; i += 3) {
-        const tv = []
+        // World-space triangle (instance transform applied). ALL original
+        // vertices feed the auto-fit extent — including culled/clipped ones —
+        // so framing stays stable across section/cull decisions.
+        const wv = []
         for (let j = 0; j < 3; j++) {
           const idx = indices[i + j]
           let vx = verts[idx*3], vy = verts[idx*3+1], vz = verts[idx*3+2]
           if (transform) [vx, vy, vz] = applyMatPoint(transform, vx, vy, vz)
-          const [px, py, pz] = project(vx, vy, vz)
-          tv.push({ px, py, pz })
+          wv.push([vx, vy, vz])
+          const [px, py] = project(vx, vy, vz)
           allPts2d.push([px, py])
         }
         let nx = norms[indices[i]*3], ny = norms[indices[i]*3+1], nz = norms[indices[i]*3+2]
         if (transform) [nx, ny, nz] = applyMatVec(transform, nx, ny, nz)
         const [, , lz] = project(nx, ny, nz)
-        if (lz < 0) continue  // back-face cull
-        const brightness = Math.max(0.25, Math.min(1, 0.3 + 0.7 * lz))
+
+        // Back faces: culled normally — but with a section active they ARE the
+        // interior walls the cut exposes, so shade them (darker) instead.
+        let facing = 1
+        if (lz < 0) {
+          if (!section) continue
+          facing = 0.72
+        }
+
+        // Section clip (world space) → 0..4-gon → fan triangulation.
+        let polys = [wv]
+        if (section) {
+          const clipped = clipPolyToSection(wv, section)
+          if (clipped.length < 3) continue
+          polys = []
+          for (let k = 1; k + 1 < clipped.length; k++) polys.push([clipped[0], clipped[k], clipped[k + 1]])
+        }
+
+        const brightness = Math.max(0.25, Math.min(1, 0.3 + 0.7 * Math.abs(lz))) * facing
         const shade = 100 + 130 * brightness
-        tris.push({
-          v: tv,
-          r: Math.round(shade * palette[0]),
-          g: Math.round(shade * palette[1]),
-          b: Math.round(shade * palette[2]),
-        })
+        const r = Math.round(shade * palette[0])
+        const g = Math.round(shade * palette[1])
+        const b = Math.round(shade * palette[2])
+        for (const poly of polys) {
+          const tv = poly.map(([vx, vy, vz]) => {
+            const [px, py, pz] = project(vx, vy, vz)
+            return { px, py, pz }
+          })
+          tris.push({ v: tv, r, g, b })
+        }
       }
     }
     for (const edge of (container.edges || [])) {
       const pts = edge.points
-      const projPts = []
+      // World-space polyline; original points always feed the extent.
+      const world = []
       for (let i = 0; i < pts.length; i += 3) {
         let ex = pts[i], ey = pts[i+1], ez = pts[i+2]
         if (transform) [ex, ey, ez] = applyMatPoint(transform, ex, ey, ez)
-        const [px, py, pz] = project(ex, ey, ez)
-        projPts.push({ px, py, pz })
+        world.push([ex, ey, ez])
+        const [px, py] = project(ex, ey, ez)
         allPts2d.push([px, py])
       }
-      edgeLines.push(projPts)
+      // Section: split the polyline at plane crossings, keep the ≤0 side.
+      const pieces = []
+      if (!section) {
+        pieces.push(world)
+      } else {
+        let cur = []
+        for (let i = 0; i < world.length; i++) {
+          const di = _planeDist(world[i], section)
+          if (i > 0) {
+            const dp = _planeDist(world[i - 1], section)
+            if ((dp < 0 && di > 0) || (dp > 0 && di < 0)) {
+              const t = dp / (dp - di)
+              const cut = [
+                world[i-1][0] + t * (world[i][0] - world[i-1][0]),
+                world[i-1][1] + t * (world[i][1] - world[i-1][1]),
+                world[i-1][2] + t * (world[i][2] - world[i-1][2]),
+              ]
+              if (dp <= 0) { cur.push(cut); pieces.push(cur); cur = [] }
+              else cur.push(cut)
+            }
+          }
+          if (di <= 0) cur.push(world[i])
+          else if (cur.length) { pieces.push(cur); cur = [] }
+        }
+        if (cur.length) pieces.push(cur)
+      }
+      for (const piece of pieces) {
+        if (piece.length < 2) continue
+        edgeLines.push(piece.map(([ex, ey, ez]) => {
+          const [px, py, pz] = project(ex, ey, ez)
+          return { px, py, pz }
+        }))
+      }
     }
   }
 
@@ -1682,6 +1789,9 @@ export function analyzeSession(tree) {
  * @param {string} [options.view='iso'] — one of VIEW_NAMES
  * @param {number} [options.zoom=1]
  * @param {[number,number,number]} [options.lookAt]
+ * @param {{origin:number[],normal:number[]}} [options.section] — cut the solids
+ *   at a plane: everything on the positive side of `normal` is removed, interior
+ *   walls are shown shaded (uncapped). Framing stays that of the uncut model.
  * @param {'native'|'distinct'} [options.colors='native'] — 'native' renders the
  *   model's OWN ClassCAD colors (mesh/container materials); 'distinct' gives
  *   every body its own palette color — use it to tell bodies apart (booleans,
@@ -1705,7 +1815,7 @@ export async function renderSessionData(source, options = {}) {
   if (content.solids.length > 0 && graphic?.containers?.some(c => c.type === 1 && c.meshes?.length > 0)) {
     const solidOnly = { ...graphic, containers: graphic.containers.filter(c => c.type === 1 && c.meshes?.length > 0) }
     const instances = extractAssemblyInstances(tree)
-    const zbuf = renderSolidZBuffer(solidOnly, width, height, instances, options.colors ?? 'native')
+    const zbuf = renderSolidZBuffer(solidOnly, width, height, instances, { colors: options.colors ?? 'native', section: options.section })
     if (zbuf) out.push({ type: 'solid', kind: 'pixels', ...zbuf })
   }
 
