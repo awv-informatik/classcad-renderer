@@ -1,0 +1,54 @@
+{
+  "name": "@classcad/renderer",
+  "version": "0.1.0",
+  "description": "Deterministic renderer for ClassCAD session data — solids (z-buffer, assembly transforms), constrained sketches (dimensions, constraints, label de-overlap), curves, and work geometry. Fixed CAD views (iso/top/front/…), auto-fit, reproducible output. Portable core (browser + Node) with adapters for PNG encoding.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/awv-informatik/classcad-renderer.git"
+  },
+  "keywords": [
+    "classcad",
+    "buerli",
+    "cad",
+    "renderer",
+    "isometric",
+    "snapshot",
+    "deterministic",
+    "svg",
+    "png"
+  ],
+  "type": "module",
+  "main": "src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./core": "./src/core.mjs",
+    "./node": "./src/node.mjs",
+    "./browser": "./src/browser.mjs",
+    "./stl": "./src/stl.mjs"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/smoke.mjs"
+  },
+  "peerDependencies": {
+    "sharp": "^0.34.0"
+  },
+  "peerDependenciesMeta": {
+    "sharp": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "sharp": "^0.34.5"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
