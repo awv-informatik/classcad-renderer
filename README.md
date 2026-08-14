@@ -55,6 +55,22 @@ await renderSession(client, 'detail', './out', { view: 'front', zoom: 3, lookAt:
 > **destroys entity-injection (direct-modeling) bodies** — pass `{ recalc: false }`
 > for sessions built with `solid.*`/EIF flows.
 
+## Verification toolkit
+
+Options on every solid render (all composable, all deterministic):
+
+| Option | What it does | Verifies |
+| --- | --- | --- |
+| `section: { origin, normal }` | cuts the model at a plane (positive side removed, uncapped, interior shaded darker, framing unchanged) | internal features: bores, chambers, wall thickness |
+| `frame` (+ returned `frame`) | pins scale & center of an earlier render → pixel-comparable before/after | regenerations — feed both into `diffImages(a, b)` |
+| `diffImages(a, b)` | change count/fraction/bbox + visualization (unchanged faded, changed red) | "what actually changed?" |
+| `sheet: true` | ONE image with four views (top/iso/front/right; ortho trio shares one scale; labeled) | overall shape, one image for vision models |
+| `highlight: [ids]` | container/solid/face-mesh/edge ids in signal orange/red | "which face/edge/body is id N?" |
+| `markers: [{ position, label }]` | crosshair + label at world coords, always on top | probe points of numeric checks |
+| `sketchOverlay: true` | sketch curves drawn in 3D on their actual plane (construction dashed violet) | sketch sits on the intended plane/place |
+| `annotate: true` | bbox extents, view-oriented RGB axes triad, scale bar | "how big, which way up?" |
+| `xray: true` | translucent bodies (edges opaque) | quick internal check without picking a section plane |
+
 ## Colors
 
 Two modes, `colors` option, on every solid render:
