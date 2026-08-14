@@ -28,7 +28,7 @@ Views: `iso` (default), `top`, `bottom`, `front`, `back`, `left`, `right` — pl
 | `@classcad/renderer` (root) / `./core` | browser + Node, zero deps | all rendering: `renderSessionData`, `renderSolidZBuffer`, `renderSketchSVG`, `renderCurveSVG`, `renderWorkGeoSVG`, extraction helpers, `setViewport`, `VIEW_NAMES` |
 | `./node` | Node (needs `sharp`) | PNG encode/save, `svgToPng`, and the harness-compatible `renderSession(client, prefix, outDir, options)` |
 | `./browser` | browser, zero deps | canvas PNG encoding: `entryToPngBase64`, `pixelsToPngBase64`, `svgToPngBase64` |
-| `./stl` | anywhere | legacy STL-triangle isometric renderer |
+| `./stl` | anywhere | STL-triangle renderer (`parseSTL` + `renderIsometric`) — renders the EXPORTED file, independent of the graphic pipeline; use for export verification or graphics-disabled clients |
 
 The core is **pure data → pixels/SVG**. It needs three things, all injectable:
 the structure `tree`, the `graphic` payload (containers with meshes/edges), and —

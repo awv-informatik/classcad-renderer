@@ -1,5 +1,12 @@
 /**
- * stl.mjs — Isometric renderer for STL triangles (legacy path).
+ * stl.mjs — Isometric renderer for STL triangles.
+ *
+ * Renders what an EXPORTED STL file actually contains — independent of the
+ * engine's graphic pipeline. Two uses:
+ *   1. Export verification: render the exported artifact and compare against
+ *      the live-session render; a mismatch means the export is wrong.
+ *   2. Graphics-disabled clients (no graphic pushes): STL export on demand is
+ *      the only render path available.
  * Pure: returns an RGBA pixel buffer; encode/save via node.mjs or browser.mjs.
  */
 
