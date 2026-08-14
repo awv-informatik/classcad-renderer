@@ -85,6 +85,8 @@ export const VIEW_NAMES = Object.keys(VIEWS)
 let _project = projectIso
 let _zoom = 1
 let _lookAt = null
+let _forcedFrame = null   // set via setViewport({ frame }) — overrides auto-fit
+let _lastFrame = null     // frame actually used by the most recent viewTransform
 
 function project(x, y, z) {
   return _project(x, y, z)
@@ -142,6 +144,10 @@ function projectionFromCamera(v) {
  *   object: { azimuth, elevation } (degrees) or { direction: [x,y,z], up? }
  * @param {number} [opts.zoom=1] — multiplier on the auto-fit scale
  * @param {[number,number,number]|null} [opts.lookAt=null] — 3D point that lands at screen center
+ * @param {{scale:number,midX:number,midY:number}|null} [opts.frame=null] — REUSE a
+ *   frame returned by an earlier render (same view + image size): pins scale and
+ *   center so renders of different model states are pixel-comparable. Overrides
+ *   auto-fit, zoom and lookAt.
  */
 export function setViewport(opts = {}) {
   const v = opts.view
@@ -152,6 +158,7 @@ export function setViewport(opts = {}) {
   }
   _zoom = (typeof opts.zoom === 'number' && opts.zoom > 0) ? opts.zoom : 1
   _lookAt = Array.isArray(opts.lookAt) && opts.lookAt.length === 3 ? opts.lookAt : null
+  _forcedFrame = opts.frame && typeof opts.frame.scale === 'number' ? { ...opts.frame } : null
 }
 
 function bbox2d(pts) {
@@ -164,6 +171,17 @@ function bbox2d(pts) {
 }
 
 function viewTransform(pts2d, width, height, margin = 40) {
+  // A forced frame (setViewport({ frame })) wins over auto-fit, zoom and
+  // lookAt — it pins scale AND center, making successive renders of a
+  // CHANGING model pixel-comparable (the basis for diffImages).
+  if (_forcedFrame) {
+    const { scale, midX, midY } = _forcedFrame
+    _lastFrame = { scale, midX, midY }
+    return (x, y) => [
+      width / 2 + (x - midX) * scale,
+      height / 2 - (y - midY) * scale
+    ]
+  }
   const { minX, maxX, minY, maxY } = bbox2d(pts2d)
   const rangeX = maxX - minX || 1
   const rangeY = maxY - minY || 1
@@ -177,6 +195,7 @@ function viewTransform(pts2d, width, height, margin = 40) {
     midX = (minX + maxX) / 2
     midY = (minY + maxY) / 2
   }
+  _lastFrame = { scale, midX, midY }
   return (x, y) => [
     width / 2 + (x - midX) * scale,
     height / 2 - (y - midY) * scale
@@ -609,7 +628,7 @@ export function renderSolidZBuffer(graphic, width = IMG_W, height = IMG_H, insta
     }
   }
 
-  return { pixels, width, height }
+  return { pixels, width, height, frame: _lastFrame ? { ..._lastFrame } : null }
 }
 
 /** Rasterize a single triangle with per-pixel depth test */
@@ -1768,6 +1787,64 @@ export function analyzeSession(tree) {
 
 
 // ═══════════════════════════════════════════════════════════════════════════
+// IMAGE DIFF — for before/after verification with a pinned frame
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Compare two same-size RGBA renders. Meaningful ONLY when both were rendered
+ * with the same view/size and a PINNED frame (options.frame) — auto-fit
+ * reframes when geometry changes, which would make every pixel "differ".
+ *
+ * @param {{pixels:Uint8Array|Buffer,width:number,height:number}} a — before
+ * @param {{pixels:Uint8Array|Buffer,width:number,height:number}} b — after
+ * @param {object} [opts]
+ * @param {number} [opts.tolerance=0] — per-channel absolute tolerance
+ * @returns {{changed:number,total:number,fraction:number,
+ *            bbox:{minX:number,minY:number,maxX:number,maxY:number}|null,
+ *            pixels:Uint8Array|Buffer,width:number,height:number}}
+ *   `pixels` visualizes the diff: unchanged content faded, changed pixels red.
+ */
+export function diffImages(a, b, opts = {}) {
+  if (a.width !== b.width || a.height !== b.height) {
+    throw new Error(`diffImages: size mismatch (${a.width}x${a.height} vs ${b.width}x${b.height})`)
+  }
+  const tol = opts.tolerance ?? 0
+  const { width, height } = a
+  const out = allocPixels(width * height * 4)
+  let changed = 0
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4
+      const differs =
+        Math.abs(a.pixels[i] - b.pixels[i]) > tol ||
+        Math.abs(a.pixels[i+1] - b.pixels[i+1]) > tol ||
+        Math.abs(a.pixels[i+2] - b.pixels[i+2]) > tol
+      if (differs) {
+        changed++
+        out[i] = 220; out[i+1] = 30; out[i+2] = 30; out[i+3] = 255
+        if (x < minX) minX = x; if (x > maxX) maxX = x
+        if (y < minY) minY = y; if (y > maxY) maxY = y
+      } else {
+        // Faded grayscale of the AFTER image as context.
+        const lum = Math.round(0.299 * b.pixels[i] + 0.587 * b.pixels[i+1] + 0.114 * b.pixels[i+2])
+        const v = 255 - Math.round((255 - lum) * 0.25)
+        out[i] = v; out[i+1] = v; out[i+2] = v; out[i+3] = 255
+      }
+    }
+  }
+  return {
+    changed,
+    total: width * height,
+    fraction: changed / (width * height),
+    bbox: changed ? { minX, minY, maxX, maxY } : null,
+    pixels: out,
+    width,
+    height,
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // DATA-LEVEL ORCHESTRATOR — pure: no file IO, no PNG encoding, no client
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1789,6 +1866,9 @@ export function analyzeSession(tree) {
  * @param {string} [options.view='iso'] — one of VIEW_NAMES
  * @param {number} [options.zoom=1]
  * @param {[number,number,number]} [options.lookAt]
+ * @param {{scale:number,midX:number,midY:number}} [options.frame] — pin the view
+ *   frame to one returned by an earlier solid render (same view/size) so
+ *   before/after images are pixel-comparable; feed both to diffImages.
  * @param {{origin:number[],normal:number[]}} [options.section] — cut the solids
  *   at a plane: everything on the positive side of `normal` is removed, interior
  *   walls are shown shaded (uncapped). Framing stays that of the uncut model.
@@ -1808,7 +1888,7 @@ export async function renderSessionData(source, options = {}) {
   const height = options.height || IMG_H
   const out = []
 
-  setViewport({ view: options.view, zoom: options.zoom, lookAt: options.lookAt })
+  setViewport({ view: options.view, zoom: options.zoom, lookAt: options.lookAt, frame: options.frame })
   const content = analyzeSession(tree)
 
   // ── SOLIDS ── (type-1 containers with meshes; assemblies get per-instance transforms)

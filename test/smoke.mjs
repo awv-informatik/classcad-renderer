@@ -179,6 +179,48 @@ assert.ok(leftHit && rightHit, `assembly places both instances (left ${leftHit},
   assert.ok(isoCut.pixels.some((v, i) => i % 4 === 0 && v !== 255), 'sectioned iso renders')
 }
 
+// 5a3. Frame pinning + diffImages: before/after with locked frame → localized diff
+{
+  const { diffImages } = await import('../src/core.mjs')
+  const [before] = await renderSessionData({ tree, graphic }, { width: 200, height: 150 })
+  assert.ok(before.frame && before.frame.scale > 0, 'render returns its frame')
+
+  // Same state, pinned frame → byte-identical (pinning a matching frame is a no-op)
+  const [samePinned] = await renderSessionData({ tree, graphic }, { width: 200, height: 150, frame: before.frame })
+  assert.ok(Buffer.compare(Buffer.from(before.pixels), Buffer.from(samePinned.pixels)) === 0, 'pinned same frame → identical')
+
+  // Changed state: second cube far right. Pinned frame keeps the first cube's pixels.
+  const twoBody = cubeGraphic()
+  const g2 = cubeGraphic()
+  for (let i = 0; i < g2.containers[0].meshes[0].vertices.length; i += 3) g2.containers[0].meshes[0].vertices[i] += 25
+  g2.containers[0].id = 101
+  g2.containers[0].edges = []
+  twoBody.containers.push(g2.containers[0])
+  const [after] = await renderSessionData({ tree, graphic: twoBody }, { width: 200, height: 150, frame: before.frame })
+  const d = diffImages(before, after)
+  assert.ok(d.changed > 0 && d.bbox, 'diff detects the added body')
+  // All change must lie RIGHT of the original cube (x+25 → to the right on screen in iso)
+  const firstCubeMaxX = (() => {
+    let mx = 0
+    for (let y = 0; y < 150; y++) for (let x = 0; x < 200; x++) {
+      const i = (y * 200 + x) * 4
+      if (before.pixels[i] !== 255 || before.pixels[i+1] !== 255 || before.pixels[i+2] !== 255) if (x > mx) mx = x
+    }
+    return mx
+  })()
+  assert.ok(d.bbox.minX > firstCubeMaxX - 3, `change localized right of the original (${d.bbox.minX} > ~${firstCubeMaxX})`)
+  assert.ok(d.fraction < 0.5, `change fraction is local (${d.fraction.toFixed(3)})`)
+  // Identical inputs → zero diff
+  const d0 = diffImages(before, before)
+  assert.equal(d0.changed, 0)
+  assert.equal(d0.bbox, null)
+  // WITHOUT pinning, auto-fit reframes → the diff bleeds into UNCHANGED
+  // geometry (the original cube region), which is exactly what pinning prevents.
+  const [afterUnpinned] = await renderSessionData({ tree, graphic: twoBody }, { width: 200, height: 150 })
+  const dU = diffImages(before, afterUnpinned)
+  assert.ok(dU.bbox.minX < firstCubeMaxX - 3, `unpinned diff pollutes the unchanged region (minX ${dU.bbox.minX})`)
+}
+
 // 5b. Generalized camera: named-view equivalences + arbitrary views
 {
   const px = async view => (await renderSessionData({ tree, graphic }, { width: 200, height: 150, view }))[0].pixels
