@@ -5,6 +5,8 @@ session data. Same input → same image, every time: fixed CAD views, auto-fit f
 no camera state, no GPU. Built for agents and pipelines that need to *verify* geometry
 visually — not for interactive display.
 
+![Verification toolkit — section, diff, sheet, highlight/markers, sketch overlay, annotate, x-ray](docs/gallery.png)
+
 What it renders, auto-detected from the structure tree:
 
 - **Solids** — z-buffer rasterizer from the engine's graphic payload (meshes + edges),
